@@ -5,6 +5,8 @@ Standalone Telegram bot client that reads OTP messages from NumPlus API and forw
 ## Features
 - Polls API every 30 seconds.
 - Supports multiple API accounts.
+- Stores account API tokens in `token_cache.json`.
+- Refreshes account tokens automatically every 2 hours (or on failure).
 - Supports multiple Telegram groups.
 - Stores sent messages by `start_date` to avoid duplicate sends.
 - Formats message with:
@@ -20,6 +22,7 @@ Standalone Telegram bot client that reads OTP messages from NumPlus API and forw
 - `platforms.json`: service names, shortcuts, emojis, custom emoji ids
 - `country_codes.json`: country metadata
 - `sent_codes_store.json`: sent message state
+- `token_cache.json`: cached account tokens with expiry metadata
 - `.env`: runtime config
 
 ## Setup
@@ -47,6 +50,7 @@ Notes:
 - If `accounts.json` has valid accounts, `API_SESSION_TOKEN` can stay empty.
 - Bot asks for missing values at runtime.
 - Bot always asks for start date on each run.
+- Cached account tokens expire after 2 hours and are renewed automatically.
 
 ## Run
 Run continuous mode:

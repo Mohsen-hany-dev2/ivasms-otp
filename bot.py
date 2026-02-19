@@ -16,6 +16,9 @@ PLATFORMS_FILE = BASE_DIR / "platforms.json"
 ACCOUNTS_FILE = BASE_DIR / "accounts.json"
 GROUPS_FILE = BASE_DIR / "groups.json"
 STORE_FILE = BASE_DIR / "sent_codes_store.json"
+TOKEN_CACHE_FILE = BASE_DIR / "token_cache.json"
+TOKEN_TTL_SECONDS = 2 * 60 * 60
+TOKEN_REFRESH_SKEW_SECONDS = 5 * 60
 
 
 def ask(prompt: str, default: str | None = None) -> str:
@@ -222,6 +225,67 @@ def save_store(store: dict) -> None:
     STORE_FILE.write_text(json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def load_token_cache() -> dict:
+    if not TOKEN_CACHE_FILE.exists():
+        return {"accounts": {}}
+    try:
+        data = json.loads(TOKEN_CACHE_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, dict) and isinstance(data.get("accounts"), dict):
+            return data
+    except Exception:
+        pass
+    return {"accounts": {}}
+
+
+def save_token_cache(cache: dict) -> None:
+    TOKEN_CACHE_FILE.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def cache_get_valid_token(cache: dict, account_name: str) -> str | None:
+    row = (cache.get("accounts") or {}).get(account_name)
+    if not isinstance(row, dict):
+        return None
+    token = str(row.get("token", "")).strip()
+    expires_at = int(row.get("expires_at", 0) or 0)
+    if not token or expires_at <= int(time.time()) + TOKEN_REFRESH_SKEW_SECONDS:
+        return None
+    return token
+
+
+def cache_set_token(cache: dict, account_name: str, token: str) -> None:
+    now = int(time.time())
+    cache.setdefault("accounts", {})[account_name] = {
+        "token": token,
+        "obtained_at": now,
+        "expires_at": now + TOKEN_TTL_SECONDS,
+    }
+
+
+def get_or_refresh_account_token(
+    api_base: str,
+    account: dict[str, str],
+    account_tokens: dict[str, str],
+    token_cache: dict,
+) -> str | None:
+    name = account["name"]
+    mem_tok = account_tokens.get(name)
+    if mem_tok and cache_get_valid_token(token_cache, name):
+        return mem_tok
+
+    cached_tok = cache_get_valid_token(token_cache, name)
+    if cached_tok:
+        account_tokens[name] = cached_tok
+        return cached_tok
+
+    new_tok = api_login(api_base, account["email"], account["password"])
+    if not new_tok:
+        return None
+    account_tokens[name] = new_tok
+    cache_set_token(token_cache, name, new_tok)
+    save_token_cache(token_cache)
+    return new_tok
+
+
 def msg_key(item: dict) -> str:
     number = str(item.get("number", ""))
     service_name = str(item.get("service_name", ""))
@@ -276,11 +340,11 @@ def run_loop(start_date: str, api_base: str, api_token: str, tg_token: str, targ
     seen_keys = set(bucket.get("seen_keys", []))
 
     accounts = load_accounts()
+    token_cache = load_token_cache()
     account_tokens: dict[str, str] = {}
     for acc in accounts:
-        tok = api_login(api_base, acc["email"], acc["password"])
+        tok = get_or_refresh_account_token(api_base, acc, account_tokens, token_cache)
         if tok:
-            account_tokens[acc["name"]] = tok
             print(f"account ready: {acc['name']}")
         else:
             print(f"account login failed: {acc['name']}")
@@ -299,11 +363,7 @@ def run_loop(start_date: str, api_base: str, api_token: str, tg_token: str, targ
 
         for acc in accounts:
             name = acc["name"]
-            tok = account_tokens.get(name)
-            if not tok:
-                tok = api_login(api_base, acc["email"], acc["password"])
-                if tok:
-                    account_tokens[name] = tok
+            tok = get_or_refresh_account_token(api_base, acc, account_tokens, token_cache)
             if not tok:
                 continue
             try:
@@ -313,6 +373,8 @@ def run_loop(start_date: str, api_base: str, api_token: str, tg_token: str, targ
                 if not new_tok:
                     continue
                 account_tokens[name] = new_tok
+                cache_set_token(token_cache, name, new_tok)
+                save_token_cache(token_cache)
                 try:
                     all_rows.extend(fetch_messages(api_base, new_tok, start_date, limit))
                 except Exception:

@@ -8,7 +8,8 @@ Standalone Telegram bot client that reads OTP messages from NumPlus API and forw
 - Stores account API tokens in `token_cache.json`.
 - Refreshes account tokens automatically every 2 hours (or on failure).
 - Supports multiple Telegram groups.
-- Stores sent messages by `start_date` to avoid duplicate sends.
+- Stores sent messages in a daily file (`daily_messages/messages_YYYY-MM-DD.json`).
+- Automatically deletes previous days and keeps current day file only.
 - Formats message with:
   - quoted header (service short + country code + flag + number)
   - message body as code block
@@ -21,7 +22,7 @@ Standalone Telegram bot client that reads OTP messages from NumPlus API and forw
 - `groups.json`: Telegram groups list
 - `platforms.json`: service names, shortcuts, emojis, custom emoji ids
 - `country_codes.json`: country metadata
-- `sent_codes_store.json`: sent message state
+- `daily_messages/messages_YYYY-MM-DD.json`: sent message state for current day
 - `token_cache.json`: cached account tokens with expiry metadata
 - `.env`: runtime config
 

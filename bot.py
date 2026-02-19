@@ -17,6 +17,7 @@ ACCOUNTS_FILE = BASE_DIR / "accounts.json"
 GROUPS_FILE = BASE_DIR / "groups.json"
 STORE_FILE = BASE_DIR / "sent_codes_store.json"
 TOKEN_CACHE_FILE = BASE_DIR / "token_cache.json"
+DAILY_STORE_DIR = BASE_DIR / "daily_messages"
 TOKEN_TTL_SECONDS = 2 * 60 * 60
 TOKEN_REFRESH_SKEW_SECONDS = 5 * 60
 
@@ -209,20 +210,44 @@ def send_telegram_message(bot_token: str, chat_id: str, text: str, copy_value: s
     return r2.json()
 
 
-def load_store() -> dict:
-    if not STORE_FILE.exists():
-        return {"by_start_date": {}}
+def _today_key() -> str:
+    return date.today().isoformat()
+
+
+def _daily_store_path(day_key: str) -> Path:
+    return DAILY_STORE_DIR / f"messages_{day_key}.json"
+
+
+def cleanup_old_daily_files(current_day_key: str) -> None:
+    DAILY_STORE_DIR.mkdir(parents=True, exist_ok=True)
+    keep_path = _daily_store_path(current_day_key).resolve()
+    for p in DAILY_STORE_DIR.glob("messages_*.json"):
+        try:
+            if p.resolve() != keep_path:
+                p.unlink(missing_ok=True)
+        except Exception:
+            continue
+
+
+def load_daily_store(day_key: str) -> dict:
+    DAILY_STORE_DIR.mkdir(parents=True, exist_ok=True)
+    path = _daily_store_path(day_key)
+    if not path.exists():
+        return {"day": day_key, "seen_keys": [], "sent": []}
     try:
-        data = json.loads(STORE_FILE.read_text(encoding="utf-8"))
-        if isinstance(data, dict) and isinstance(data.get("by_start_date"), dict):
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict) and isinstance(data.get("seen_keys"), list) and isinstance(data.get("sent"), list):
+            data["day"] = day_key
             return data
     except Exception:
         pass
-    return {"by_start_date": {}}
+    return {"day": day_key, "seen_keys": [], "sent": []}
 
 
-def save_store(store: dict) -> None:
-    STORE_FILE.write_text(json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8")
+def save_daily_store(day_key: str, store: dict) -> None:
+    DAILY_STORE_DIR.mkdir(parents=True, exist_ok=True)
+    path = _daily_store_path(day_key)
+    path.write_text(json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def load_token_cache() -> dict:
@@ -335,9 +360,10 @@ def run_loop(start_date: str, api_base: str, api_token: str, tg_token: str, targ
     countries = load_countries()
     platform_rows = load_json_list(PLATFORMS_FILE)
     platforms = load_platforms()
-    store = load_store()
-    bucket = store["by_start_date"].setdefault(start_date, {"seen_keys": [], "sent": []})
-    seen_keys = set(bucket.get("seen_keys", []))
+    active_day = _today_key()
+    cleanup_old_daily_files(active_day)
+    day_store = load_daily_store(active_day)
+    seen_keys = set(day_store.get("seen_keys", []))
 
     accounts = load_accounts()
     token_cache = load_token_cache()
@@ -353,6 +379,14 @@ def run_loop(start_date: str, api_base: str, api_token: str, tg_token: str, targ
     print("Press Ctrl+C to stop.\n")
 
     while True:
+        now_day = _today_key()
+        if now_day != active_day:
+            active_day = now_day
+            cleanup_old_daily_files(active_day)
+            day_store = load_daily_store(active_day)
+            seen_keys = set(day_store.get("seen_keys", []))
+            print(f"Rotated daily message store to {active_day}")
+
         all_rows: list[dict] = []
 
         if api_token:
@@ -421,7 +455,7 @@ def run_loop(start_date: str, api_base: str, api_token: str, tg_token: str, targ
             if any_sent:
                 mkey = msg_key(item)
                 seen_keys.add(mkey)
-                bucket["sent"].append(
+                day_store["sent"].append(
                     {
                         "number": number,
                         "code": code,
@@ -433,8 +467,8 @@ def run_loop(start_date: str, api_base: str, api_token: str, tg_token: str, targ
                         "sent_at": time.strftime("%Y-%m-%d %H:%M:%S"),
                     }
                 )
-                bucket["seen_keys"] = list(seen_keys)
-                save_store(store)
+                day_store["seen_keys"] = list(seen_keys)
+                save_daily_store(active_day, day_store)
 
         if once:
             return

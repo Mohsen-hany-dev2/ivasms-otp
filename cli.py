@@ -7,6 +7,7 @@ BASE_DIR = Path(__file__).resolve().parent
 ACCOUNTS_FILE = BASE_DIR / "accounts.json"
 GROUPS_FILE = BASE_DIR / "groups.json"
 STORE_FILE = BASE_DIR / "sent_codes_store.json"
+DAILY_STORE_DIR = BASE_DIR / "daily_messages"
 PLATFORMS_FILE = BASE_DIR / "platforms.json"
 
 
@@ -40,14 +41,20 @@ def add_group(name: str, chat_id: str, enabled: bool) -> None:
 
 
 def clear_store(start_date: str | None) -> None:
-    data = load_json(STORE_FILE, {"by_start_date": {}})
     if start_date:
-        data.setdefault("by_start_date", {}).pop(start_date, None)
-        save_json(STORE_FILE, data)
-        print(f"cleared store for start_date={start_date}")
-    else:
-        save_json(STORE_FILE, {"by_start_date": {}})
-        print("cleared all stored messages")
+        target = DAILY_STORE_DIR / f"messages_{start_date}.json"
+        if target.exists():
+            target.unlink(missing_ok=True)
+            print(f"cleared daily store for day={start_date}")
+        else:
+            print(f"no daily store found for day={start_date}")
+        return
+
+    if DAILY_STORE_DIR.exists():
+        for p in DAILY_STORE_DIR.glob("messages_*.json"):
+            p.unlink(missing_ok=True)
+    save_json(STORE_FILE, {"by_start_date": {}})
+    print("cleared all stored messages")
 
 
 def list_accounts() -> None:

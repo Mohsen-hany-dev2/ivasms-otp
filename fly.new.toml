@@ -1,0 +1,13 @@
+app = "ivasms-cli"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile.fly"
+
+[processes]
+  app = "python main.py"
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory_mb = 512

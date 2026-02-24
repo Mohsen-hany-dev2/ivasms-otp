@@ -44,6 +44,7 @@ PLACEHOLDER_VALUES = {
 LOG_FORMAT = "%(asctime)s | %(levelname)-7s | %(name)s | %(message)s"
 logger = logging.getLogger("numplus-bot")
 LOG_THROTTLE_SECONDS = 120
+DEFAULT_POLL_INTERVAL_SECONDS = 30
 _LAST_LOG_AT: dict[str, int] = {}
 
 
@@ -463,6 +464,15 @@ def runtime_bot_limit(default_value: int) -> int:
     return max(1, min(100, n))
 
 
+def runtime_poll_interval(default_value: int) -> int:
+    cfg = load_runtime_config()
+    try:
+        n = int(str(cfg.get("poll_interval_seconds", default_value)).strip())
+    except Exception:
+        n = int(default_value)
+    return max(5, min(300, n))
+
+
 def runtime_messages_update_marker() -> str:
     cfg = load_runtime_config()
     return str(cfg.get("messages_update_requested_at", "")).strip()
@@ -696,6 +706,7 @@ def run_loop(start_date: str, api_base: str, api_token: str, tg_token: str, targ
     current_api_token = runtime_api_session_token(api_token)
     current_start_date = runtime_start_date(start_date)
     current_limit = runtime_bot_limit(limit)
+    current_poll_interval = runtime_poll_interval(DEFAULT_POLL_INTERVAL_SECONDS)
 
     countries = load_countries()
     platform_rows = load_json_list(PLATFORMS_FILE)
@@ -720,7 +731,12 @@ def run_loop(start_date: str, api_base: str, api_token: str, tg_token: str, targ
         else:
             logger.warning("account login failed | account=%s", acc["name"])
 
-    logger.info("started polling | interval=30s | start_date=%s | limit=%s", current_start_date, current_limit)
+    logger.info(
+        "started polling | interval=%ss | start_date=%s | limit=%s",
+        current_poll_interval,
+        current_start_date,
+        current_limit,
+    )
     logger.info("press Ctrl+C to stop")
 
     while True:
@@ -731,6 +747,7 @@ def run_loop(start_date: str, api_base: str, api_token: str, tg_token: str, targ
             current_api_token = runtime_api_session_token(current_api_token)
             current_start_date = runtime_start_date(current_start_date)
             current_limit = runtime_bot_limit(current_limit)
+            current_poll_interval = runtime_poll_interval(current_poll_interval)
             countries = load_countries()
             platform_rows = load_json_list(PLATFORMS_FILE)
             platforms = load_platforms()
@@ -750,7 +767,7 @@ def run_loop(start_date: str, api_base: str, api_token: str, tg_token: str, targ
                 logger.info("fetch codes is paused by runtime config")
             if once:
                 return
-            time.sleep(30)
+            time.sleep(current_poll_interval)
             continue
 
         now_day = _today_key()
@@ -803,7 +820,7 @@ def run_loop(start_date: str, api_base: str, api_token: str, tg_token: str, targ
                 logger.info("no new messages")
             if once:
                 return
-            time.sleep(30)
+            time.sleep(current_poll_interval)
             continue
 
         logger.info("new messages | count=%s", len(new_rows))
@@ -876,7 +893,7 @@ def run_loop(start_date: str, api_base: str, api_token: str, tg_token: str, targ
 
         if once:
             return
-        time.sleep(30)
+        time.sleep(current_poll_interval)
 
 
 def main() -> None:
@@ -913,33 +930,20 @@ def main() -> None:
         except Exception:
             limit = 30
     else:
-        if is_real_value(default_api):
-            api_base = ask_missing("API domain", default_api).rstrip("/")
-        else:
-            api_base = ask("API domain", "http://127.0.0.1:8000").rstrip("/")
+        api_base = runtime_api_base(default_api if is_real_value(default_api) else "http://127.0.0.1:8000").rstrip("/")
         tg_token = ask_missing("Telegram bot token", default_tg_token)
         groups = load_groups()
         if groups:
             target_groups = groups
         else:
-            chat_id = ask_missing("Telegram group/chat id", default_chat_id)
-            target_groups = [{"name": "default_group", "chat_id": chat_id}]
+            fallback_chat = default_chat_id.strip()
+            target_groups = [{"name": "default_group", "chat_id": fallback_chat}] if fallback_chat else []
 
-        # Ask only if token missing and no usable accounts file.
         accounts = load_accounts()
         api_token = default_api_token if is_real_value(default_api_token) else ""
-        if not api_token and not accounts:
-            api_token = ask("API session token (missing and no accounts found)")
-
-        # Keep start date interactive every run, while other core settings stay persisted.
-        start_date_raw = ask("Start date YYYY-MM-DD", default_start or date.today().isoformat())
-        start_date = normalize_start_date(start_date_raw)
-        if start_date != start_date_raw:
-            print(f"Normalized/invalid date input. Using: {start_date}")
-
-        limit_raw = ask("Messages limit", default_limit or "30")
+        start_date = normalize_start_date(default_start or date.today().isoformat())
         try:
-            limit = max(1, min(100, int(limit_raw)))
+            limit = max(1, min(100, int(default_limit or "30")))
         except Exception:
             limit = 30
 

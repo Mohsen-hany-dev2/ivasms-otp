@@ -1,4 +1,5 @@
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import logging
 import os
@@ -45,6 +46,7 @@ LOG_FORMAT = "%(asctime)s | %(levelname)-7s | %(name)s | %(message)s"
 logger = logging.getLogger("numplus-bot")
 LOG_THROTTLE_SECONDS = 120
 DEFAULT_POLL_INTERVAL_SECONDS = 30
+DEFAULT_GROUP_SEND_INTERVAL_SECONDS = 1.2
 _LAST_LOG_AT: dict[str, int] = {}
 
 
@@ -262,10 +264,26 @@ def extract_code(message: str) -> str:
     return ""
 
 
+def mask_number_middle(value: str, hidden_digits: int = 2) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return raw
+    chars = list(raw)
+    digit_positions = [i for i, ch in enumerate(chars) if ch.isdigit()]
+    if len(digit_positions) <= (hidden_digits + 2):
+        return raw
+    mid_start = (len(digit_positions) - hidden_digits) // 2
+    target_positions = digit_positions[mid_start : mid_start + hidden_digits]
+    for pos in target_positions:
+        chars[pos] = "•"
+    return "".join(chars)
+
+
 def build_message(item: dict, countries: list[dict[str, str]], platforms: dict[str, str], platform_rows: list[dict]) -> str:
     raw_number = str(item.get("number", ""))
     number_digits = digits_only(raw_number)
     number_with_plus = f"+{number_digits}" if number_digits else raw_number
+    number_display = mask_number_middle(number_with_plus, hidden_digits=2)
     service_name = str(item.get("service_name", "Unknown"))
     short = service_short(service_name, platforms)
     semoji_id = service_emoji_id(service_name, platform_rows)
@@ -275,7 +293,7 @@ def build_message(item: dict, countries: list[dict[str, str]], platforms: dict[s
     iso2 = country.get("iso2", "UN")
     flag = iso_to_flag(iso2)
     message_text = str(item.get("message", "")).strip()
-    escaped_head = _md_escape(f"{short} {iso2} {flag} {number_with_plus}")
+    escaped_head = _md_escape(f"{short} {iso2} {flag} {number_display}")
     escaped_msg = _md_code_escape(message_text)
     custom = f"![{semoji_alt}](tg://emoji?id={semoji_id}) " if (use_custom_emoji and semoji_id) else f"{semoji_alt} "
     return f"> {custom}*{escaped_head}*\n```\n{escaped_msg}\n```"
@@ -360,6 +378,16 @@ def edit_telegram_message(bot_token: str, chat_id: str, message_id: int, text: s
     return data2
 
 
+def _telegram_retry_after_seconds(resp: dict) -> int:
+    if not isinstance(resp, dict):
+        return 0
+    try:
+        params = resp.get("parameters") or {}
+        return int(params.get("retry_after") or 0)
+    except Exception:
+        return 0
+
+
 def _today_key() -> str:
     return date.today().isoformat()
 
@@ -389,8 +417,10 @@ def load_daily_store(day_key: str) -> dict:
         data["day"] = day_key
         if not isinstance(data.get("latest_by_thread"), dict):
             data["latest_by_thread"] = {}
+        if not isinstance(data.get("delivered_by_msg"), dict):
+            data["delivered_by_msg"] = {}
         return data
-    return {"day": day_key, "seen_keys": [], "sent": [], "latest_by_thread": {}}
+    return {"day": day_key, "seen_keys": [], "sent": [], "latest_by_thread": {}, "delivered_by_msg": {}}
 
 
 def save_daily_store(day_key: str, store: dict) -> None:
@@ -440,7 +470,9 @@ def runtime_bot_limit(default_value: int) -> int:
         n = int(raw)
     except Exception:
         n = int(default_value)
-    return max(1, min(100, n))
+    if n <= 0:
+        return 0
+    return max(1, min(10000, n))
 
 
 def runtime_api_base(default_value: str) -> str:
@@ -461,7 +493,9 @@ def runtime_bot_limit(default_value: int) -> int:
         n = int(str(cfg.get("bot_limit", default_value)).strip())
     except Exception:
         n = int(default_value)
-    return max(1, min(100, n))
+    if n <= 0:
+        return 0
+    return max(1, min(10000, n))
 
 
 def runtime_poll_interval(default_value: int) -> int:
@@ -537,6 +571,22 @@ def msg_key(item: dict) -> str:
     service_name = str(item.get("service_name", ""))
     message = str(item.get("message", ""))
     rng = str(item.get("range", ""))
+    # Include stable identifiers/timestamps when available so repeated messages
+    # with same content are not dropped by dedup logic.
+    for k in (
+        "id",
+        "message_id",
+        "sms_id",
+        "code_id",
+        "created_at",
+        "received_at",
+        "timestamp",
+        "date",
+        "time",
+    ):
+        v = str(item.get(k, "")).strip()
+        if v:
+            return f"{number}|{service_name}|{rng}|{message}|{k}={v}"
     return f"{number}|{service_name}|{rng}|{message}"
 
 
@@ -698,7 +748,10 @@ def fetch_messages(api_base: str, api_token: str, start_date: str, limit: int) -
         raise RuntimeError(f"invalid json response | status={r.status_code} | body={_short_text(r.text)}") from exc
     if r.status_code != 200:
         raise RuntimeError(str(j))
-    return ((j.get("data") or {}).get("messages") or [])[:limit]
+    rows = ((j.get("data") or {}).get("messages") or [])
+    if limit <= 0:
+        return rows
+    return rows[:limit]
 
 
 def run_loop(start_date: str, api_base: str, api_token: str, tg_token: str, target_groups: list[dict[str, str]], limit: int, once: bool) -> None:
@@ -719,11 +772,19 @@ def run_loop(start_date: str, api_base: str, api_token: str, tg_token: str, targ
     if not isinstance(latest_by_thread, dict):
         latest_by_thread = {}
         day_store["latest_by_thread"] = latest_by_thread
+    delivered_by_msg = day_store.get("delivered_by_msg", {})
+    if not isinstance(delivered_by_msg, dict):
+        delivered_by_msg = {}
+        day_store["delivered_by_msg"] = delivered_by_msg
 
     accounts = load_accounts()
     token_cache = load_token_cache()
     account_tokens: dict[str, str] = {}
+    current_target_groups: list[dict[str, str]] = list(target_groups)
     update_marker = runtime_messages_update_marker()
+    group_min_interval = float(os.getenv("TG_GROUP_MIN_INTERVAL_SEC", str(DEFAULT_GROUP_SEND_INTERVAL_SECONDS)).strip() or DEFAULT_GROUP_SEND_INTERVAL_SECONDS)
+    last_group_send_at: dict[str, float] = {}
+    invalid_groups: set[str] = set()
     for acc in accounts:
         tok = get_or_refresh_account_token(current_api_base, acc, account_tokens, token_cache)
         if tok:
@@ -752,14 +813,31 @@ def run_loop(start_date: str, api_base: str, api_token: str, tg_token: str, targ
             platform_rows = load_json_list(PLATFORMS_FILE)
             platforms = load_platforms()
             accounts = load_accounts()
+            refreshed_groups = load_groups()
+            if refreshed_groups:
+                current_target_groups = refreshed_groups
+                invalid_groups.clear()
             token_cache = load_token_cache()
             account_tokens = {}
+            # Reload persisted message state immediately after runtime updates
+            # (e.g. when admin clears saved messages) without waiting for restart/day-rotation.
+            day_store = load_daily_store(active_day)
+            seen_keys = set(day_store.get("seen_keys", []))
+            latest_by_thread = day_store.get("latest_by_thread", {})
+            if not isinstance(latest_by_thread, dict):
+                latest_by_thread = {}
+                day_store["latest_by_thread"] = latest_by_thread
+            delivered_by_msg = day_store.get("delivered_by_msg", {})
+            if not isinstance(delivered_by_msg, dict):
+                delivered_by_msg = {}
+                day_store["delivered_by_msg"] = delivered_by_msg
             logger.info(
-                "runtime refresh requested | marker=%s | api_base=%s | start_date=%s | limit=%s",
+                "runtime refresh requested | marker=%s | api_base=%s | start_date=%s | limit=%s | groups=%s",
                 latest_marker,
                 current_api_base,
                 current_start_date,
                 current_limit,
+                len(current_target_groups),
             )
 
         if not is_fetch_codes_enabled():
@@ -780,42 +858,78 @@ def run_loop(start_date: str, api_base: str, api_token: str, tg_token: str, targ
             if not isinstance(latest_by_thread, dict):
                 latest_by_thread = {}
                 day_store["latest_by_thread"] = latest_by_thread
+            delivered_by_msg = day_store.get("delivered_by_msg", {})
+            if not isinstance(delivered_by_msg, dict):
+                delivered_by_msg = {}
+                day_store["delivered_by_msg"] = delivered_by_msg
             logger.info("rotated daily store | day=%s", active_day)
 
         all_rows: list[dict] = []
-
-        if current_api_token:
-            try:
-                all_rows.extend(fetch_messages(current_api_base, current_api_token, current_start_date, current_limit))
-            except Exception as exc:
-                logger.warning("api token fetch failed | error=%s", _short_text(exc))
-
+        account_jobs: list[tuple[str, dict[str, str], str]] = []
         for acc in accounts:
             name = acc["name"]
             tok = get_or_refresh_account_token(current_api_base, acc, account_tokens, token_cache)
-            if not tok:
-                continue
-            try:
-                all_rows.extend(fetch_messages(current_api_base, tok, current_start_date, current_limit))
-            except Exception:
-                new_tok = api_login(current_api_base, acc["email"], acc["password"])
-                if not new_tok:
-                    continue
-                account_tokens[name] = new_tok
-                cache_set_token(token_cache, name, new_tok)
-                save_token_cache(token_cache)
-                try:
-                    all_rows.extend(fetch_messages(current_api_base, new_tok, current_start_date, current_limit))
-                except Exception:
-                    continue
+            if tok:
+                account_jobs.append((name, acc, tok))
+
+        total_jobs = len(account_jobs) + (1 if current_api_token else 0)
+        if total_jobs:
+            max_workers = max(1, min(16, total_jobs))
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                futures: dict = {}
+                if current_api_token:
+                    fut = pool.submit(fetch_messages, current_api_base, current_api_token, current_start_date, current_limit)
+                    futures[fut] = ("api_token", None, None)
+                for name, acc, tok in account_jobs:
+                    fut = pool.submit(fetch_messages, current_api_base, tok, current_start_date, current_limit)
+                    futures[fut] = ("account", name, acc)
+
+                for fut in as_completed(futures):
+                    src, name, acc = futures[fut]
+                    try:
+                        all_rows.extend(fut.result())
+                        continue
+                    except Exception as exc:
+                        if src == "api_token":
+                            logger.warning("api token fetch failed | error=%s", _short_text(exc))
+                            continue
+                        if not acc or not name:
+                            continue
+                        # Retry once with fresh login token when account token is stale.
+                        new_tok = api_login(current_api_base, acc["email"], acc["password"])
+                        if not new_tok:
+                            logger.warning("account fetch failed | account=%s | error=%s", name, _short_text(exc))
+                            continue
+                        account_tokens[name] = new_tok
+                        cache_set_token(token_cache, name, new_tok)
+                        save_token_cache(token_cache)
+                        try:
+                            all_rows.extend(fetch_messages(current_api_base, new_tok, current_start_date, current_limit))
+                        except Exception as retry_exc:
+                            logger.warning(
+                                "account fetch retry failed | account=%s | error=%s",
+                                name,
+                                _short_text(retry_exc),
+                            )
 
         uniq: dict[str, dict] = {}
         for row in all_rows:
             uniq[msg_key(row)] = row
-        rows = list(uniq.values())[:current_limit]
-        new_rows = [x for x in rows if msg_key(x) not in seen_keys]
+        rows = list(uniq.values()) if current_limit <= 0 else list(uniq.values())[:current_limit]
+        dispatch_tasks: list[tuple[dict, list[dict[str, str]], bool]] = []
+        for item in rows:
+            mkey = msg_key(item)
+            delivered_raw = delivered_by_msg.get(mkey, [])
+            delivered_set = set(str(x) for x in delivered_raw) if isinstance(delivered_raw, list) else set()
+            missing_groups = [
+                grp
+                for grp in current_target_groups
+                if grp["chat_id"] not in delivered_set and grp["chat_id"] not in invalid_groups
+            ]
+            if missing_groups:
+                dispatch_tasks.append((item, missing_groups, mkey not in seen_keys))
 
-        if not new_rows:
+        if not dispatch_tasks:
             if _should_log("no_new_messages", throttle_seconds=300):
                 logger.info("no new messages")
             if once:
@@ -823,12 +937,17 @@ def run_loop(start_date: str, api_base: str, api_token: str, tg_token: str, targ
             time.sleep(current_poll_interval)
             continue
 
-        logger.info("new messages | count=%s", len(new_rows))
-        for idx, item in enumerate(new_rows, start=1):
+        new_count = sum(1 for _item, _targets, is_new in dispatch_tasks if is_new)
+        retry_count = len(dispatch_tasks) - new_count
+        logger.info("messages to deliver | total=%s | new=%s | retry=%s", len(dispatch_tasks), new_count, retry_count)
+        for idx, (item, task_groups, _is_new) in enumerate(dispatch_tasks, start=1):
             number = str(item.get("number", ""))
             message_text = str(item.get("message", ""))
             code = extract_code(message_text) or number
             text = build_message(item, countries, platforms, platform_rows)
+            mkey = msg_key(item)
+            delivered_raw = delivered_by_msg.get(mkey, [])
+            delivered_set = set(str(x) for x in delivered_raw) if isinstance(delivered_raw, list) else set()
             tkey = thread_key(item)
             prev_map = latest_by_thread.get(tkey, {})
             if not isinstance(prev_map, dict):
@@ -837,9 +956,16 @@ def run_loop(start_date: str, api_base: str, api_token: str, tg_token: str, targ
             any_sent = False
             sent_info: list[dict[str, str | int | None]] = []
             next_map: dict[str, int] = {}
-            for grp in target_groups:
+            for grp in task_groups:
                 gid = grp["chat_id"]
                 gname = grp["name"]
+                if gid in invalid_groups:
+                    continue
+                last_ts = last_group_send_at.get(gid, 0.0)
+                now_ts = time.monotonic()
+                wait = group_min_interval - (now_ts - last_ts)
+                if wait > 0:
+                    time.sleep(wait)
                 prev_msg_id_raw = prev_map.get(gid)
                 j: dict = {}
                 action = "send"
@@ -859,8 +985,23 @@ def run_loop(start_date: str, api_base: str, api_token: str, tg_token: str, targ
                         logger.error("send failed | idx=%s | group=%s | error=%s", idx, gname, _short_text(exc))
                         continue
                     if not j.get("ok"):
-                        logger.error("send failed | idx=%s | group=%s | response=%s", idx, gname, _short_text(j))
-                        continue
+                        retry_after = _telegram_retry_after_seconds(j)
+                        if retry_after > 0:
+                            time.sleep(max(1, retry_after + 1))
+                            try:
+                                j = send_telegram_message(tg_token, gid, text, code)
+                                action = "send"
+                            except Exception as exc:
+                                logger.error("send failed after retry | idx=%s | group=%s | error=%s", idx, gname, _short_text(exc))
+                                continue
+                        if not j.get("ok"):
+                            desc = str(j.get("description") or "").lower()
+                            if "chat not found" in desc:
+                                invalid_groups.add(gid)
+                                logger.error("group disabled (chat not found) | group=%s | chat_id=%s", gname, gid)
+                            else:
+                                logger.error("send failed | idx=%s | group=%s | response=%s", idx, gname, _short_text(j))
+                            continue
 
                 any_sent = True
                 result_row = j.get("result") or {}
@@ -869,11 +1010,15 @@ def run_loop(start_date: str, api_base: str, api_token: str, tg_token: str, targ
                     next_map[gid] = msg_id
                 sent_info.append({"group": gname, "chat_id": gid, "message_id": msg_id})
                 logger.info("%s ok | idx=%s | group=%s | message_id=%s | code=%s", action, idx, gname, msg_id, code)
+                last_group_send_at[gid] = time.monotonic()
+                delivered_set.add(gid)
 
-            if any_sent:
-                mkey = msg_key(item)
+            if any_sent or delivered_set:
                 seen_keys.add(mkey)
-                latest_by_thread[tkey] = next_map
+                merged_map = dict(prev_map)
+                merged_map.update(next_map)
+                latest_by_thread[tkey] = merged_map
+                delivered_by_msg[mkey] = sorted(delivered_set)
                 day_store["sent"].append(
                     {
                         "number": number,
@@ -889,6 +1034,7 @@ def run_loop(start_date: str, api_base: str, api_token: str, tg_token: str, targ
                 )
                 day_store["seen_keys"] = list(seen_keys)
                 day_store["latest_by_thread"] = latest_by_thread
+                day_store["delivered_by_msg"] = delivered_by_msg
                 save_daily_store(active_day, day_store)
 
         if once:
@@ -926,7 +1072,7 @@ def main() -> None:
         start_date_raw = default_start or date.today().isoformat()
         start_date = normalize_start_date(start_date_raw)
         try:
-            limit = max(1, min(100, int(default_limit or "30")))
+            limit = int(default_limit or "30")
         except Exception:
             limit = 30
     else:
@@ -943,7 +1089,7 @@ def main() -> None:
         api_token = default_api_token if is_real_value(default_api_token) else ""
         start_date = normalize_start_date(default_start or date.today().isoformat())
         try:
-            limit = max(1, min(100, int(default_limit or "30")))
+            limit = int(default_limit or "30")
         except Exception:
             limit = 30
 

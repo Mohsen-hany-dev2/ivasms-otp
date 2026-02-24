@@ -18,8 +18,8 @@ from app.paths import (
     RANGES_STORE_FILE,
     RUNTIME_CONFIG_FILE,
 )
+from app.storage import clear_daily_store, get_daily_store, list_daily_store_days
 from app.storage import load_json as db_load_json, save_json as db_save_json
-from app.storage import get_daily_store, list_daily_store_days
 
 
 MAIN_TITLE = "༺═════⇓ لوحة التحكم ⇓═════༻"
@@ -28,6 +28,7 @@ NUMBERS_TITLE = "༺═════⇓ الأرقام ⇓═════༻"
 ACCOUNTS_TITLE = "༺═════⇓ حساباتي ⇓═════༻"
 GROUPS_TITLE = "༺═════⇓ الجروبات ⇓═════༻"
 STATS_TITLE = "༺═════⇓ الاحصائيات ⇓═════༻"
+MESSAGES_TITLE = "༺═════⇓ الرسائل ⇓═════༻"
 
 TOKEN_KEYS = ("token", "access_token", "session_token", "api_token", "jwt")
 DEFAULT_ADMIN_IDS = {7011309417}
@@ -50,7 +51,6 @@ class PanelBot:
         self.user_traffic_cache: dict[int, dict[str, list[dict[str, str]]]] = {}
         self.user_numbers_cache: dict[int, list[dict[str, str]]] = {}
         self.user_lang: dict[int, str] = {}
-        self.start_date_prompt_pending = True
 
         if not self.bot_token:
             raise RuntimeError("TELEGRAM_BOT_TOKEN is missing in .env")
@@ -117,6 +117,8 @@ class PanelBot:
             data["fetch_codes_enabled"] = True
         if "messages_start_date" not in data:
             data["messages_start_date"] = os.getenv("API_START_DATE", "2025-01-01").strip() or "2025-01-01"
+        if "start_date_prompt_pending" not in data:
+            data["start_date_prompt_pending"] = not self._is_valid_day(str(data.get("messages_start_date", "")).strip())
         if "api_base_url" not in data:
             data["api_base_url"] = os.getenv("API_BASE_URL", "").strip().rstrip("/")
         if "api_session_token" not in data:
@@ -135,7 +137,18 @@ class PanelBot:
         return cfg if isinstance(cfg, dict) else {}
 
     def _save_runtime_cfg(self, cfg: dict[str, Any]) -> None:
-        cfg["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cfg["updated_at"] = now
+        cfg["bot_restart_requested_at"] = now
+        self.save_json(RUNTIME_CONFIG_FILE, cfg)
+
+    def request_bot_restart(self) -> None:
+        cfg = self.load_json(RUNTIME_CONFIG_FILE, {})
+        if not isinstance(cfg, dict):
+            cfg = {}
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cfg["updated_at"] = now
+        cfg["bot_restart_requested_at"] = now
         self.save_json(RUNTIME_CONFIG_FILE, cfg)
 
     def refresh_runtime_settings(self) -> None:
@@ -176,14 +189,19 @@ class PanelBot:
             n = int(str(cfg.get("bot_limit", "30")).strip())
         except Exception:
             n = 30
-        return max(1, min(100, n))
+        if n <= 0:
+            return 0
+        return max(1, min(10000, n))
 
     def set_runtime_bot_limit(self, value: str) -> bool:
         try:
             n = int(str(value or "").strip())
         except Exception:
             return False
-        n = max(1, min(100, n))
+        if n <= 0:
+            n = 0
+        else:
+            n = max(1, min(10000, n))
         cfg = self._load_runtime_cfg()
         cfg["bot_limit"] = n
         self._save_runtime_cfg(cfg)
@@ -250,6 +268,21 @@ class PanelBot:
         env_default = os.getenv("API_START_DATE", "2025-01-01").strip() or "2025-01-01"
         return env_default
 
+    def is_start_date_prompt_pending(self) -> bool:
+        cfg = self.load_json(RUNTIME_CONFIG_FILE, {})
+        if isinstance(cfg, dict) and "start_date_prompt_pending" in cfg:
+            return bool(cfg.get("start_date_prompt_pending", False))
+        # Backward compatibility: if no valid start date, keep prompt pending.
+        return not self._is_valid_day(self.get_runtime_start_date())
+
+    def set_start_date_prompt_pending(self, pending: bool) -> None:
+        cfg = self.load_json(RUNTIME_CONFIG_FILE, {})
+        if not isinstance(cfg, dict):
+            cfg = {}
+        cfg["start_date_prompt_pending"] = bool(pending)
+        cfg["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.save_json(RUNTIME_CONFIG_FILE, cfg)
+
     def set_runtime_start_date(self, day_value: str) -> bool:
         value = str(day_value or "").strip()
         if not self._is_valid_day(value):
@@ -258,8 +291,8 @@ class PanelBot:
         if not isinstance(cfg, dict):
             cfg = {}
         cfg["messages_start_date"] = value
-        cfg["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        self.save_json(RUNTIME_CONFIG_FILE, cfg)
+        cfg["start_date_prompt_pending"] = False
+        self._save_runtime_cfg(cfg)
         return True
 
     def request_messages_refresh(self) -> None:
@@ -279,8 +312,7 @@ class PanelBot:
         if not isinstance(data, dict):
             data = {}
         data["fetch_codes_enabled"] = bool(enabled)
-        data["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        self.save_json(RUNTIME_CONFIG_FILE, data)
+        self._save_runtime_cfg(data)
 
     def load_accounts(self) -> list[dict[str, Any]]:
         rows = self.load_json(ACCOUNTS_FILE, [])
@@ -300,6 +332,7 @@ class PanelBot:
 
     def save_accounts(self, rows: list[dict[str, Any]]) -> None:
         self.save_json(ACCOUNTS_FILE, rows)
+        self.request_bot_restart()
 
     def load_groups(self) -> list[dict[str, Any]]:
         rows = self.load_json(GROUPS_FILE, [])
@@ -318,6 +351,7 @@ class PanelBot:
 
     def save_groups(self, rows: list[dict[str, Any]]) -> None:
         self.save_json(GROUPS_FILE, rows)
+        self.request_bot_restart()
 
     def normalize_group_target(self, raw: str) -> str:
         value = str(raw or "").strip()
@@ -660,6 +694,9 @@ class PanelBot:
     def _title_stats(self, user_id: int) -> str:
         return self._q(self._tr(user_id, f"📈 {STATS_TITLE}", "📈 ༺═════⇓ Statistics ⇓═════༻"))
 
+    def _title_messages(self, user_id: int) -> str:
+        return self._q(self._tr(user_id, f"💬 {MESSAGES_TITLE}", "💬 ༺═════⇓ Messages ⇓═════༻"))
+
     def _set_user_traffic_rows(self, user_id: int, app_name: str, rows: list[dict[str, str]]) -> None:
         key = self._traffic_key(app_name)
         self.user_traffic_cache.setdefault(int(user_id), {})[key] = rows
@@ -733,7 +770,7 @@ class PanelBot:
         buttons = [
             self._btn(toggle_label, callback_data="toggle_fetch", style="success" if enabled else "danger"),
             self._btn(self._tr(user_id, "⚙️ المتغيرات", "⚙️ Variables"), callback_data="vars_menu", style="primary"),
-            self._btn(self._tr(user_id, "🔄 تحديث الرسائل", "🔄 Refresh Messages"), callback_data="refresh_data", style="primary"),
+            self._btn(self._tr(user_id, "💬 الرسائل", "💬 Messages"), callback_data="messages_menu", style="primary"),
             self._btn(self._tr(user_id, "🌐 اللغة", "🌐 Language"), callback_data="lang_menu", style="primary"),
             self._btn(self._tr(user_id, "📊 الترافيك", "📊 Traffic"), callback_data="traffic_menu", style="primary"),
             self._btn(self._tr(user_id, "🧩 المنصات المتاحة", "🧩 Platforms"), callback_data="show_platforms", style="primary"),
@@ -746,13 +783,20 @@ class PanelBot:
         ]
         return self._pattern_rows(buttons)
 
+    def kb_messages_menu(self, user_id: int) -> list[list[dict[str, Any]]]:
+        buttons = [
+            self._btn(self._tr(user_id, "📄 عرض الرسائل", "📄 Show Messages"), callback_data="messages_show", style="primary"),
+            self._btn(self._tr(user_id, "🗑️ حذف الرسائل", "🗑️ Delete Messages"), callback_data="messages_delete_confirm", style="danger"),
+        ]
+        return self._pattern_rows(buttons, back_callback="main_menu", back_text=self._tr(user_id, "رجوع", "Back"))
+
     def kb_vars_menu(self, user_id: int) -> list[list[dict[str, Any]]]:
         buttons = [
             self._btn(self._tr(user_id, "🌐 API URL", "🌐 API URL"), callback_data="var_set_api_url", style="primary"),
             self._btn(self._tr(user_id, "🗓️ Start Date", "🗓️ Start Date"), callback_data="var_set_start_date", style="primary"),
             self._btn(self._tr(user_id, "📦 BOT LIMIT", "📦 BOT LIMIT"), callback_data="var_set_bot_limit", style="primary"),
             self._btn(self._tr(user_id, "➕ إضافة أدمن", "➕ Add Admin"), callback_data="var_add_admin", style="success"),
-            self._btn(self._tr(user_id, "🔄 إعادة تحميل البوت", "🔄 Reload Bot"), callback_data="var_reload", style="primary"),
+            self._btn(self._tr(user_id, "🔁 إعادة تشغيل البوت", "🔁 Restart Bot"), callback_data="var_restart", style="danger"),
         ]
         return self._pattern_rows(buttons, back_callback="main_menu", back_text=self._tr(user_id, "رجوع", "Back"))
 
@@ -1474,6 +1518,51 @@ class PanelBot:
         ]
         self.edit_text(chat_id, message_id, "\n".join(lines), self.kb_back_main(user_id))
 
+    def show_saved_messages(self, chat_id: int | str, message_id: int, user_id: int) -> None:
+        day_keys = sorted(list_daily_store_days())
+        if not day_keys:
+            text = self._title_messages(user_id) + "\n" + self._tr(
+                user_id,
+                "لا توجد رسائل محفوظة حتى الآن.",
+                "No saved messages yet.",
+            )
+            self.edit_text(chat_id, message_id, text, self.kb_messages_menu(user_id))
+            return
+
+        total_messages = 0
+        all_rows: list[dict[str, Any]] = []
+        for day_key in day_keys:
+            day_payload = get_daily_store(day_key, {})
+            if not isinstance(day_payload, dict):
+                continue
+            sent_rows = day_payload.get("sent")
+            if not isinstance(sent_rows, list):
+                continue
+            for row in sent_rows:
+                if isinstance(row, dict):
+                    all_rows.append(row)
+            total_messages += len(sent_rows)
+
+        lines = [
+            self._title_messages(user_id),
+            self._tr(user_id, f"📆 الأيام: {len(day_keys)}", f"📆 Days: {len(day_keys)}"),
+            self._tr(user_id, f"✉️ إجمالي الرسائل: {total_messages}", f"✉️ Total messages: {total_messages}"),
+        ]
+
+        preview = all_rows[-10:] if all_rows else []
+        if preview:
+            lines.append(self._tr(user_id, "🧾 آخر 10 رسائل:", "🧾 Last 10 messages:"))
+            for row in preview:
+                sent_at = str(row.get("sent_at") or "-")
+                service = str(row.get("service_name") or "-")
+                rng = str(row.get("range") or "-")
+                code = str(row.get("code") or "-")
+                lines.append(f"{sent_at} | {service} | {rng} | {code}")
+        else:
+            lines.append(self._tr(user_id, "لا توجد بيانات تفصيلية.", "No detailed rows."))
+
+        self.edit_text(chat_id, message_id, "\n".join(lines), self.kb_messages_menu(user_id))
+
     def show_variables(self, chat_id: int | str, message_id: int, user_id: int) -> None:
         api_url = self.get_runtime_api_base()
         start_date = self.get_runtime_start_date()
@@ -1688,8 +1777,8 @@ class PanelBot:
                 chat_id,
                 self._tr(
                     user_id,
-                    f"اكتب BOT LIMIT (1..100)\nالحالي: {current}",
-                    f"Send BOT LIMIT (1..100)\nCurrent: {current}",
+                    f"اكتب BOT LIMIT (0 = بدون حد)\nالحالي: {current}",
+                    f"Send BOT LIMIT (0 = unlimited)\nCurrent: {current}",
                 ),
             )
             return
@@ -1702,9 +1791,10 @@ class PanelBot:
             )
             return
 
-        if data == "var_reload":
+        if data in {"var_reload", "var_restart"}:
+            self.request_bot_restart()
             self.request_messages_refresh()
-            self.answer_callback(callback_id, self._tr(user_id, "تم إعادة تحميل الإعدادات.", "Settings reload requested."))
+            self.answer_callback(callback_id, self._tr(user_id, "تم طلب إعادة تشغيل البوت.", "Bot restart requested."))
             self.show_variables(chat_id, message_id, user_id)
             return
 
@@ -1731,14 +1821,51 @@ class PanelBot:
             self.show_main(chat_id, user_id, message_id)
             return
 
+        if data == "messages_menu":
+            self.edit_text(
+                chat_id,
+                message_id,
+                self._title_messages(user_id) + "\n" + self._tr(user_id, "اختر العملية.", "Choose an action."),
+                self.kb_messages_menu(user_id),
+            )
+            return
+
+        if data == "messages_show":
+            self._show_loading(
+                chat_id,
+                message_id,
+                self._tr(user_id, MESSAGES_TITLE, "༺═════⇓ Messages ⇓═════༻"),
+                self._tr(user_id, "⏳ جاري تحميل الرسائل...", "⏳ Loading messages..."),
+                "messages_menu",
+                user_id,
+            )
+            self._run_async(self.show_saved_messages, chat_id, message_id, user_id)
+            return
+
+        if data == "messages_delete_confirm":
+            clear_daily_store()
+            self.answer_callback(callback_id, self._tr(user_id, "تم حذف الرسائل المحفوظة.", "Saved messages deleted."))
+            self.edit_text(
+                chat_id,
+                message_id,
+                self._title_messages(user_id) + "\n" + self._tr(user_id, "تم حذف كل الرسائل المحفوظة.", "All saved messages were deleted."),
+                self.kb_messages_menu(user_id),
+            )
+            return
+
         if data == "refresh_data":
             self.platforms_cache = {"at": 0.0, "data": []}
             self.traffic_cache = {}
             self.user_traffic_cache.pop(user_id, None)
             self.user_numbers_cache.pop(user_id, None)
             self.request_messages_refresh()
-            self.answer_callback(callback_id, self._tr(user_id, "تم طلب تحديث الرسائل.", "Messages refresh requested."))
-            self.show_main(chat_id, user_id, message_id)
+            self.answer_callback(callback_id, self._tr(user_id, "تم التحديث.", "Refreshed."))
+            self.edit_text(
+                chat_id,
+                message_id,
+                self._title_messages(user_id) + "\n" + self._tr(user_id, "تم تحديث الكاش الداخلي.", "Internal cache refreshed."),
+                self.kb_messages_menu(user_id),
+            )
             return
 
         if data == "traffic_menu":
@@ -2105,7 +2232,7 @@ class PanelBot:
 
         if text in ("/start", "start", "menu", "/menu"):
             self.clear_state(user_id)
-            if self.start_date_prompt_pending:
+            if self.is_start_date_prompt_pending():
                 current = self.get_runtime_start_date()
                 self.set_state(user_id, "wait_start_date")
                 self.send_text(
@@ -2134,6 +2261,18 @@ class PanelBot:
             return
 
         if not state:
+            # If state was lost but admin sent a valid start date directly, accept it.
+            if self._is_valid_day(text) and self.set_runtime_start_date(text):
+                self.send_text(
+                    chat_id,
+                    self._tr(
+                        user_id,
+                        f"تم حفظ وقت البداية: {text}",
+                        f"Start date saved: {text}",
+                    ),
+                )
+                self.show_main(chat_id, user_id)
+                return
             self.send_text(chat_id, self._tr(user_id, "اكتب /start لفتح لوحة التحكم.", "Send /start to open control panel."))
             return
 
@@ -2144,7 +2283,6 @@ class PanelBot:
             if not self.set_runtime_start_date(text):
                 self.send_text(chat_id, self._tr(user_id, "صيغة غير صحيحة. اكتب YYYY-MM-DD", "Invalid format. Use YYYY-MM-DD"))
                 return
-            self.start_date_prompt_pending = False
             self.clear_state(user_id)
             self.send_text(
                 chat_id,
@@ -2179,7 +2317,7 @@ class PanelBot:
 
         if mode == "wait_var_bot_limit":
             if not self.set_runtime_bot_limit(text):
-                self.send_text(chat_id, self._tr(user_id, "القيمة غير صحيحة. اكتب رقم من 1 إلى 100.", "Invalid value. Send number from 1 to 100."))
+                self.send_text(chat_id, self._tr(user_id, "القيمة غير صحيحة. اكتب 0 (بدون حد) أو رقمًا صحيحًا.", "Invalid value. Send 0 (unlimited) or a valid number."))
                 return
             self.clear_state(user_id)
             self.request_messages_refresh()

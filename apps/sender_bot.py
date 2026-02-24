@@ -498,29 +498,6 @@ def runtime_bot_limit(default_value: int) -> int:
     return max(1, min(10000, n))
 
 
-def runtime_api_base(default_value: str) -> str:
-    cfg = load_runtime_config()
-    value = str(cfg.get("api_base_url", "")).strip().rstrip("/")
-    return value or default_value
-
-
-def runtime_api_session_token(default_value: str) -> str:
-    cfg = load_runtime_config()
-    value = str(cfg.get("api_session_token", "")).strip()
-    return value or default_value
-
-
-def runtime_bot_limit(default_value: int) -> int:
-    cfg = load_runtime_config()
-    try:
-        n = int(str(cfg.get("bot_limit", default_value)).strip())
-    except Exception:
-        n = int(default_value)
-    if n <= 0:
-        return 0
-    return max(1, min(10000, n))
-
-
 def runtime_poll_interval(default_value: int) -> int:
     cfg = load_runtime_config()
     try:

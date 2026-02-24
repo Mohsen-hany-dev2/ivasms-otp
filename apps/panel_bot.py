@@ -49,7 +49,8 @@ class PanelBot:
         self.platforms_cache: dict[str, Any] = {"at": 0.0, "data": []}
         self.traffic_cache: dict[str, dict[str, Any]] = {}
         self.user_traffic_cache: dict[int, dict[str, list[dict[str, str]]]] = {}
-        self.user_numbers_cache: dict[int, list[dict[str, str]]] = {}
+        self.user_numbers_cache: dict[int, dict[str, list[dict[str, str]]]] = {}
+        self.user_numbers_view_account: dict[int, str | None] = {}
         self.user_lang: dict[int, str] = {}
 
         if not self.bot_token:
@@ -234,6 +235,33 @@ class PanelBot:
                 continue
             seen.add(xi)
             out.append(xi)
+        cfg["panel_admin_ids"] = out
+        self._save_runtime_cfg(cfg)
+        self.refresh_runtime_settings()
+        return True
+
+    def remove_runtime_admin(self, value: str) -> bool:
+        v = str(value or "").strip()
+        if not v.isdigit():
+            return False
+        aid = int(v)
+        cfg = self._load_runtime_cfg()
+        admins = cfg.get("panel_admin_ids")
+        if not isinstance(admins, list):
+            admins = []
+        out: list[int] = []
+        removed = False
+        for x in admins:
+            sx = str(x).strip()
+            if not sx.isdigit():
+                continue
+            xi = int(sx)
+            if xi == aid:
+                removed = True
+                continue
+            out.append(xi)
+        if not removed:
+            return False
         cfg["panel_admin_ids"] = out
         self._save_runtime_cfg(cfg)
         self.refresh_runtime_settings()
@@ -587,6 +615,14 @@ class PanelBot:
             else:
                 msg = str(payload)
             return False, payload, f"status={r.status_code} {msg}"
+        if isinstance(payload, dict):
+            status_val = payload.get("status")
+            if isinstance(status_val, bool) and not status_val:
+                msg = str(payload.get("message") or payload.get("error") or payload.get("detail") or payload).strip()
+                return False, payload, msg or "status=false"
+            if isinstance(status_val, str) and status_val.strip().lower() in {"error", "failed", "fail"}:
+                msg = str(payload.get("message") or payload.get("error") or payload.get("detail") or payload).strip()
+                return False, payload, msg or f"status={status_val}"
         return True, payload, ""
 
     def api_login(self, email: str, password: str) -> tuple[str | None, str]:
@@ -718,11 +754,13 @@ class PanelBot:
             return rows
         return None
 
-    def _set_user_numbers_rows(self, user_id: int, rows: list[dict[str, str]]) -> None:
-        self.user_numbers_cache[int(user_id)] = rows
+    def _set_user_numbers_rows(self, user_id: int, rows: list[dict[str, str]], scope: str = "all") -> None:
+        key = str(scope or "all").strip().lower() or "all"
+        self.user_numbers_cache.setdefault(int(user_id), {})[key] = rows
 
-    def _get_user_numbers_rows(self, user_id: int) -> list[dict[str, str]] | None:
-        rows = self.user_numbers_cache.get(int(user_id))
+    def _get_user_numbers_rows(self, user_id: int, scope: str = "all") -> list[dict[str, str]] | None:
+        key = str(scope or "all").strip().lower() or "all"
+        rows = self.user_numbers_cache.get(int(user_id), {}).get(key)
         if isinstance(rows, list):
             return rows
         return None
@@ -770,6 +808,57 @@ class PanelBot:
                 out.append(new_row)
         return out
 
+    def kb_numbers_scope(self, user_id: int) -> list[list[dict[str, Any]]]:
+        buttons = [
+            self._btn(self._tr(user_id, "📋 عرض جميع الأرقام", "📋 Show All Numbers"), callback_data="numbers_show_all", style="primary"),
+            self._btn(self._tr(user_id, "🎯 عرض مخصص (حسب الحساب)", "🎯 Custom View (by account)"), callback_data="numbers_show_custom", style="primary"),
+        ]
+        return self._pattern_rows(buttons, back_callback="numbers_menu", back_text=self._tr(user_id, "رجوع", "Back"))
+
+    def _active_account_names(self) -> list[str]:
+        names: list[str] = []
+        for row in self.active_accounts():
+            name = str(row.get("name") or "").strip()
+            if name:
+                names.append(name)
+        return names
+
+    def _account_name_by_pick(self, pick: str) -> str:
+        names = self._active_account_names()
+        try:
+            idx = int(str(pick).strip()) - 1
+        except Exception:
+            return ""
+        if idx < 0 or idx >= len(names):
+            return ""
+        return names[idx]
+
+    def kb_account_picker(
+        self,
+        user_id: int,
+        callback_prefix: str,
+        *,
+        back_callback: str,
+    ) -> list[list[dict[str, Any]]]:
+        names = self._active_account_names()
+        if not names:
+            return [[self._btn(self._tr(user_id, "لا يوجد حسابات مفعلة.", "No active accounts."), callback_data="noop", style="danger")], [self._btn(self._tr(user_id, "رجوع", "Back"), callback_data=back_callback, style="primary")]]
+        buttons = [
+            self._btn(f"👤 {name}", callback_data=f"{callback_prefix}:{idx}", style="primary")
+            for idx, name in enumerate(names, start=1)
+        ]
+        return self._pattern_rows(buttons, back_callback=back_callback, back_text=self._tr(user_id, "رجوع", "Back"))
+
+    def _range_remaining(self, range_name: str, account_name: str | None = None) -> int:
+        store = self.load_ranges_store()
+        entry = self.range_entry(store, range_name)
+        requested = int(entry.get("requested_total", 0) or 0)
+        if account_name:
+            accounts = entry.get("accounts") if isinstance(entry.get("accounts"), dict) else {}
+            acc_row = accounts.get(account_name) if isinstance(accounts.get(account_name), dict) else {}
+            requested = int(acc_row.get("requested_total", 0) or 0)
+        return max(0, self.range_limit_total() - requested)
+
     def kb_main(self, user_id: int) -> list[list[dict[str, Any]]]:
         enabled = self.fetch_codes_enabled()
         toggle_label = (
@@ -805,10 +894,18 @@ class PanelBot:
             self._btn(self._tr(user_id, "🌐 API URL", "🌐 API URL"), callback_data="var_set_api_url", style="primary"),
             self._btn(self._tr(user_id, "🗓️ Start Date", "🗓️ Start Date"), callback_data="var_set_start_date", style="primary"),
             self._btn(self._tr(user_id, "📦 BOT LIMIT", "📦 BOT LIMIT"), callback_data="var_set_bot_limit", style="primary"),
-            self._btn(self._tr(user_id, "➕ إضافة أدمن", "➕ Add Admin"), callback_data="var_add_admin", style="success"),
+            self._btn(self._tr(user_id, "👮 إدارة الأدمن", "👮 Admin Management"), callback_data="var_admins_menu", style="primary"),
             self._btn(self._tr(user_id, "🔁 إعادة تشغيل البوت", "🔁 Restart Bot"), callback_data="var_restart", style="danger"),
         ]
         return self._pattern_rows(buttons, back_callback="main_menu", back_text=self._tr(user_id, "رجوع", "Back"))
+
+    def kb_admins_menu(self, user_id: int) -> list[list[dict[str, Any]]]:
+        buttons = [
+            self._btn(self._tr(user_id, "➕ إضافة أدمن", "➕ Add Admin"), callback_data="var_admin_add", style="success"),
+            self._btn(self._tr(user_id, "🗑️ حذف أدمن", "🗑️ Delete Admin"), callback_data="var_admin_delete_menu", style="danger"),
+            self._btn(self._tr(user_id, "📄 عرض الأدمن", "📄 Show Admins"), callback_data="var_admin_list", style="primary"),
+        ]
+        return self._pattern_rows(buttons, back_callback="vars_menu", back_text=self._tr(user_id, "رجوع", "Back"))
 
     def kb_back_main(self, user_id: int) -> list[list[dict[str, Any]]]:
         return [[self._btn(self._tr(user_id, "رجوع", "Back"), callback_data="main_menu", style="primary")]]
@@ -962,8 +1059,11 @@ class PanelBot:
         self.traffic_cache[key] = {"at": now, "data": final_rows}
         return final_rows
 
-    def fetch_numbers(self) -> list[dict[str, str]]:
+    def fetch_numbers(self, account_name: str | None = None) -> list[dict[str, str]]:
         targets = self.resolve_targets()
+        if account_name:
+            target_name = str(account_name).strip().lower()
+            targets = [row for row in targets if str(row[0]).strip().lower() == target_name]
         merged: list[dict[str, str]] = []
         seen: set[str] = set()
 
@@ -1027,7 +1127,7 @@ class PanelBot:
             }
         return ranges[range_name]
 
-    def request_numbers_for_range(self, user_id: int, range_name: str, count: int) -> str:
+    def request_numbers_for_range(self, user_id: int, range_name: str, count: int, account_name: str | None = None) -> str:
         range_name = str(range_name or "").strip()
         if not range_name:
             return self._tr(user_id, "اسم الرينج مطلوب.", "Range name is required.")
@@ -1039,6 +1139,10 @@ class PanelBot:
 
         max_total = self.range_limit_total()
         already = int(entry.get("requested_total", 0) or 0)
+        if account_name:
+            accounts_map = entry.get("accounts") if isinstance(entry.get("accounts"), dict) else {}
+            acc_row = accounts_map.get(account_name) if isinstance(accounts_map.get(account_name), dict) else {}
+            already = int(acc_row.get("requested_total", 0) or 0)
         remaining = max_total - already
         if remaining <= 0:
             return self._tr(user_id, f"الرينج {range_name} وصل الحد الأقصى ({max_total}).", f"Range {range_name} reached max limit ({max_total}).")
@@ -1051,8 +1155,11 @@ class PanelBot:
             return self._tr(user_id, f"العدد المطلوب {count} أكبر من المتبقي {remaining}. المسموح الآن {allowed}.", f"Requested {count} is greater than remaining {remaining}. Allowed now: {allowed}.")
 
         targets = self.resolve_targets()
+        if account_name:
+            target_name = str(account_name).strip().lower()
+            targets = [row for row in targets if str(row[0]).strip().lower() == target_name]
         if not targets:
-            return self._tr(user_id, "لا يوجد حساب/توكن صالح لتنفيذ الطلب.", "No valid account/token available for request.")
+            return self._tr(user_id, "الحساب غير متاح أو لا يوجد توكن صالح لتنفيذ الطلب.", "Selected account is not available or has no valid token.")
 
         calls_needed = count // 50
         summary: list[str] = []
@@ -1139,7 +1246,7 @@ class PanelBot:
                 ids.append(mapped)
             else:
                 # If it's likely already an ID, keep it; otherwise mark unresolved.
-                if "-" in raw or (raw.isdigit() and len(raw) >= 6):
+                if "-" in raw or raw.isdigit():
                     ids.append(raw)
                 else:
                     unresolved.append(raw)
@@ -1186,35 +1293,70 @@ class PanelBot:
 
             account_removed = 0
             if len(dedup_ids) == 1:
-                ok, _payload, err = self.api_post(
-                    "/api/v1/numbers/remove",
-                    {"token": token, "number_id": dedup_ids[0]},
-                    timeout=90,
-                )
-                if ok:
+                rid = dedup_ids[0]
+                single_ok = False
+                single_err = ""
+                for body in (
+                    {"token": token, "number_id": rid},
+                    {"token": token, "id": rid},
+                ):
+                    ok, _payload, err = self.api_post("/api/v1/numbers/remove", body, timeout=90)
+                    if ok:
+                        single_ok = True
+                        break
+                    single_err = err
+                if single_ok:
                     account_removed = 1
                 else:
-                    last_err = f"{name}: {err}"
+                    last_err = f"{name}: {single_err}"
             else:
-                ok, _payload, err = self.api_post(
-                    "/api/v1/numbers/remove/bulk",
+                bulk_ok = False
+                bulk_err = ""
+                bulk_payload: Any = None
+                for body in (
                     {"token": token, "ids": dedup_ids, "max_workers": min(8, len(dedup_ids))},
-                    timeout=120,
-                )
-                if ok:
-                    account_removed = len(dedup_ids)
+                    {"token": token, "number_ids": dedup_ids},
+                    {"token": token, "ids": ",".join(dedup_ids)},
+                ):
+                    ok, payload, err = self.api_post("/api/v1/numbers/remove/bulk", body, timeout=120)
+                    if ok:
+                        bulk_ok = True
+                        bulk_payload = payload
+                        break
+                    bulk_err = err
+                if bulk_ok:
+                    removed = len(dedup_ids)
+                    if isinstance(bulk_payload, dict):
+                        for key in ("removed", "deleted", "success_count", "count"):
+                            if key in bulk_payload:
+                                try:
+                                    removed = int(str(bulk_payload.get(key)).strip())
+                                except Exception:
+                                    pass
+                                break
+                    account_removed = max(0, removed)
                 else:
                     # Fallback to single remove when bulk fails.
                     for rid in dedup_ids:
-                        ok_one, _payload_one, err_one = self.api_post(
-                            "/api/v1/numbers/remove",
+                        one_ok = False
+                        one_err = ""
+                        for body_one in (
                             {"token": token, "number_id": rid},
-                            timeout=90,
-                        )
-                        if ok_one:
+                            {"token": token, "id": rid},
+                        ):
+                            ok_one, _payload_one, err_one = self.api_post(
+                                "/api/v1/numbers/remove",
+                                body_one,
+                                timeout=90,
+                            )
+                            if ok_one:
+                                one_ok = True
+                                break
+                            one_err = err_one
+                        if one_ok:
                             account_removed += 1
                         else:
-                            last_err = f"{name}: {err_one}"
+                            last_err = f"{name}: {one_err or bulk_err}"
 
             if account_removed > 0:
                 total_ok_accounts += 1
@@ -1269,12 +1411,12 @@ class PanelBot:
 
             nav_row: list[dict[str, Any]] = []
             if page > 1:
-                nav_row.append(self._btn(self._tr(user_id, "⬅️ السابق", "⬅️ Prev"), callback_data=f"platforms_nav:{page-1}", style="primary"))
+                nav_row.append(self._btn(self._tr(user_id, "⬅️ السابق", "⬅️ Prev"), callback_data=f"platforms_nav:{page-1}", style="danger"))
             else:
                 nav_row.append(self._btn("—", callback_data="noop", style="primary"))
             nav_row.append(self._btn(f"{page}/{total_pages}", callback_data="noop", style="primary"))
             if page < total_pages:
-                nav_row.append(self._btn(self._tr(user_id, "التالي ➡️", "Next ➡️"), callback_data=f"platforms_nav:{page+1}", style="primary"))
+                nav_row.append(self._btn(self._tr(user_id, "التالي ➡️", "Next ➡️"), callback_data=f"platforms_nav:{page+1}", style="success"))
             else:
                 nav_row.append(self._btn("—", callback_data="noop", style="primary"))
             kb.append(nav_row)
@@ -1303,12 +1445,12 @@ class PanelBot:
 
         nav_row: list[dict[str, Any]] = []
         if page > 1:
-            nav_row.append(self._btn(self._tr(user_id, "⬅️ السابق", "⬅️ Prev"), callback_data=f"traffic_menu_nav:{page-1}", style="primary"))
+            nav_row.append(self._btn(self._tr(user_id, "⬅️ السابق", "⬅️ Prev"), callback_data=f"traffic_menu_nav:{page-1}", style="danger"))
         else:
             nav_row.append(self._btn("—", callback_data="noop", style="primary"))
         nav_row.append(self._btn(f"{page}/{total_pages}", callback_data="noop", style="primary"))
         if page < total_pages:
-            nav_row.append(self._btn(self._tr(user_id, "التالي ➡️", "Next ➡️"), callback_data=f"traffic_menu_nav:{page+1}", style="primary"))
+            nav_row.append(self._btn(self._tr(user_id, "التالي ➡️", "Next ➡️"), callback_data=f"traffic_menu_nav:{page+1}", style="success"))
         else:
             nav_row.append(self._btn("—", callback_data="noop", style="primary"))
         kb.append(nav_row)
@@ -1347,12 +1489,12 @@ class PanelBot:
 
         nav_row: list[dict[str, Any]] = []
         if page > 1:
-            nav_row.append(self._btn(self._tr(user_id, "⬅️ السابق", "⬅️ Prev"), callback_data=f"traffic_nav:{app_name}:{page-1}", style="primary"))
+            nav_row.append(self._btn(self._tr(user_id, "⬅️ السابق", "⬅️ Prev"), callback_data=f"traffic_nav:{app_name}:{page-1}", style="danger"))
         else:
             nav_row.append(self._btn("—", callback_data="noop", style="primary"))
         nav_row.append(self._btn(f"{page}/{total_pages}", callback_data="noop", style="primary"))
         if page < total_pages:
-            nav_row.append(self._btn(self._tr(user_id, "التالي ➡️", "Next ➡️"), callback_data=f"traffic_nav:{app_name}:{page+1}", style="primary"))
+            nav_row.append(self._btn(self._tr(user_id, "التالي ➡️", "Next ➡️"), callback_data=f"traffic_nav:{app_name}:{page+1}", style="success"))
         else:
             nav_row.append(self._btn("—", callback_data="noop", style="primary"))
         buttons.append(nav_row)
@@ -1392,15 +1534,17 @@ class PanelBot:
         user_id: int,
         page: int = 1,
         refresh: bool = False,
+        account_name: str | None = None,
     ) -> None:
+        scope_key = "all" if not account_name else f"acc:{str(account_name).strip().lower()}"
         if refresh:
-            rows = self.fetch_numbers()
-            self._set_user_numbers_rows(user_id, rows)
+            rows = self.fetch_numbers(account_name=account_name)
+            self._set_user_numbers_rows(user_id, rows, scope=scope_key)
         else:
-            rows = self._get_user_numbers_rows(user_id) or []
+            rows = self._get_user_numbers_rows(user_id, scope=scope_key) or []
             if not rows:
-                rows = self.fetch_numbers()
-                self._set_user_numbers_rows(user_id, rows)
+                rows = self.fetch_numbers(account_name=account_name)
+                self._set_user_numbers_rows(user_id, rows, scope=scope_key)
 
         per_page = 10
         total = len(rows)
@@ -1412,6 +1556,11 @@ class PanelBot:
 
         lines = [
             self._title_numbers(user_id),
+            self._tr(
+                user_id,
+                "👤 الحساب: جميع الحسابات" if not account_name else f"👤 الحساب: {account_name}",
+                "👤 Account: All Accounts" if not account_name else f"👤 Account: {account_name}",
+            ),
             self._tr(user_id, "💡 توضيح: اضغط على الرقم أو الـID للنسخ.", "💡 Hint: tap number or ID to copy."),
             self._tr(user_id, f"📄 الصفحة: {page}/{total_pages}", f"📄 Page: {page}/{total_pages}"),
         ]
@@ -1437,12 +1586,12 @@ class PanelBot:
 
         nav_row: list[dict[str, Any]] = []
         if page > 1:
-            nav_row.append(self._btn(self._tr(user_id, "⬅️ السابق", "⬅️ Prev"), callback_data=f"numbers_nav:{page-1}", style="primary"))
+            nav_row.append(self._btn(self._tr(user_id, "⬅️ السابق", "⬅️ Prev"), callback_data=f"numbers_nav:{page-1}", style="danger"))
         else:
             nav_row.append(self._btn("—", callback_data="noop", style="primary"))
         nav_row.append(self._btn(f"{page}/{total_pages}", callback_data="noop", style="primary"))
         if page < total_pages:
-            nav_row.append(self._btn(self._tr(user_id, "التالي ➡️", "Next ➡️"), callback_data=f"numbers_nav:{page+1}", style="primary"))
+            nav_row.append(self._btn(self._tr(user_id, "التالي ➡️", "Next ➡️"), callback_data=f"numbers_nav:{page+1}", style="success"))
         else:
             nav_row.append(self._btn("—", callback_data="noop", style="primary"))
         kb.append(nav_row)
@@ -1453,18 +1602,28 @@ class PanelBot:
     def show_balances(self, chat_id: int | str, message_id: int, user_id: int) -> None:
         rows = self.fetch_balances()
         text = self._q(self._tr(user_id, "༺═════⇓ رصيدي ⇓═════༻", "༺═════⇓ Balances ⇓═════༻"))
-        buttons: list[dict[str, Any]] = []
+        kb: list[list[dict[str, Any]]] = []
 
         if not rows:
-            buttons.append(self._btn(self._tr(user_id, "لا يوجد حسابات", "No accounts"), callback_data="noop", style="danger"))
+            kb.append([self._btn(self._tr(user_id, "لا يوجد حسابات", "No accounts"), callback_data="noop", style="danger")])
         else:
+            kb.append(
+                [
+                    self._btn(self._tr(user_id, "اسم الحساب", "Account"), callback_data="noop", style="primary"),
+                    self._btn(self._tr(user_id, "الرصيد", "Balance"), callback_data="noop", style="primary"),
+                ]
+            )
             for row in rows:
                 label_name = row.get("name", "-")
                 label_balance = row.get("balance", "-")
-                buttons.append(self._btn(f"{label_name}", callback_data="noop"))
-                buttons.append(self._btn(f"{label_balance}", callback_data="noop"))
+                kb.append(
+                    [
+                        self._btn(f"👤 {label_name}", callback_data="noop", style="primary"),
+                        self._btn(f"💰 {label_balance}", callback_data="noop", style="success"),
+                    ]
+                )
 
-        kb = self._pattern_rows(buttons, back_callback="main_menu", back_text=self._tr(user_id, "رجوع", "Back"))
+        kb.append([self._btn(self._tr(user_id, "رجوع", "Back"), callback_data="main_menu", style="primary")])
         self.edit_text(chat_id, message_id, text, kb)
 
     def show_stats(self, chat_id: int | str, message_id: int, user_id: int) -> None:
@@ -1693,8 +1852,15 @@ class PanelBot:
         text = self._q(self._tr(user_id, "༺═════⇓ تصدير الارقام ⇓═════༻", "༺═════⇓ Export Numbers ⇓═════༻")) + "\n" + self._tr(user_id, "اختر نوع التصدير.", "Choose export type.")
         self.edit_text(chat_id, message_id, text, self.kb_export_menu(user_id))
 
-    def _process_range_request(self, chat_id: int | str, user_id: int, range_name: str, count: int) -> None:
-        result = self.request_numbers_for_range(user_id, range_name, count)
+    def _process_range_request(
+        self,
+        chat_id: int | str,
+        user_id: int,
+        range_name: str,
+        count: int,
+        account_name: str | None = None,
+    ) -> None:
+        result = self.request_numbers_for_range(user_id, range_name, count, account_name)
         self.send_text(chat_id, result)
         self.show_main(chat_id, user_id)
 
@@ -1768,6 +1934,17 @@ class PanelBot:
             self.show_variables(chat_id, message_id, user_id)
             return
 
+        if data == "var_admins_menu":
+            self.edit_text(
+                chat_id,
+                message_id,
+                self._q(self._tr(user_id, "༺═════⇓ إدارة الأدمن ⇓═════༻", "༺═════⇓ Admin Management ⇓═════༻"))
+                + "\n"
+                + self._tr(user_id, "اختر العملية.", "Choose an action."),
+                self.kb_admins_menu(user_id),
+            )
+            return
+
         if data == "var_set_api_url":
             current = self.get_runtime_api_base()
             self.set_state(user_id, "wait_var_api_url")
@@ -1794,11 +1971,56 @@ class PanelBot:
             )
             return
 
-        if data == "var_add_admin":
+        if data in {"var_add_admin", "var_admin_add"}:
             self.set_state(user_id, "wait_var_add_admin")
             self.send_text(
                 chat_id,
                 self._tr(user_id, "اكتب Telegram User ID للأدمن الجديد.", "Send Telegram User ID for new admin."),
+            )
+            return
+
+        if data == "var_admin_list":
+            admins_txt = ", ".join(str(x) for x in self.get_runtime_admin_ids()) or "-"
+            self.edit_text(
+                chat_id,
+                message_id,
+                self._q(self._tr(user_id, "༺═════⇓ إدارة الأدمن ⇓═════༻", "༺═════⇓ Admin Management ⇓═════༻"))
+                + "\n"
+                + self._tr(user_id, f"الأدمن الحاليين:\n{admins_txt}", f"Current admins:\n{admins_txt}"),
+                self.kb_admins_menu(user_id),
+            )
+            return
+
+        if data == "var_admin_delete_menu":
+            admin_ids = self.get_runtime_admin_ids()
+            buttons = [self._btn(f"🗑️ {aid}", callback_data=f"var_admin_del:{aid}", style="danger") for aid in admin_ids]
+            kb = self._pattern_rows(buttons, back_callback="var_admins_menu", back_text=self._tr(user_id, "رجوع", "Back"))
+            self.edit_text(
+                chat_id,
+                message_id,
+                self._q(self._tr(user_id, "༺═════⇓ إدارة الأدمن ⇓═════༻", "༺═════⇓ Admin Management ⇓═════༻"))
+                + "\n"
+                + self._tr(user_id, "اختر الأدمن المراد حذفه.", "Choose admin to delete."),
+                kb,
+            )
+            return
+
+        if data.startswith("var_admin_del:"):
+            aid = data.split(":", 1)[1].strip()
+            if not self.remove_runtime_admin(aid):
+                self.answer_callback(callback_id, self._tr(user_id, "تعذر حذف الأدمن.", "Could not delete admin."))
+            else:
+                self.mark_runtime_change()
+                self.answer_callback(callback_id, self._tr(user_id, "تم حذف الأدمن.", "Admin deleted."))
+            admin_ids = self.get_runtime_admin_ids()
+            admins_txt = ", ".join(str(x) for x in admin_ids) or "-"
+            self.edit_text(
+                chat_id,
+                message_id,
+                self._q(self._tr(user_id, "༺═════⇓ إدارة الأدمن ⇓═════༻", "༺═════⇓ Admin Management ⇓═════༻"))
+                + "\n"
+                + self._tr(user_id, f"الأدمن الحاليين:\n{admins_txt}", f"Current admins:\n{admins_txt}"),
+                self.kb_admins_menu(user_id),
             )
             return
 
@@ -1935,8 +2157,33 @@ class PanelBot:
             return
 
         if data == "numbers_show":
+            text = self._title_numbers(user_id) + "\n" + self._tr(user_id, "اختر نوع العرض.", "Choose display type.")
+            self.edit_text(chat_id, message_id, text, self.kb_numbers_scope(user_id))
+            return
+
+        if data == "numbers_show_all":
+            self.user_numbers_view_account[user_id] = None
             self._show_loading(chat_id, message_id, NUMBERS_TITLE, self._tr(user_id, "⏳ جاري تحميل الأرقام...", "⏳ Loading numbers..."), "numbers_menu", user_id)
-            self._run_async(self.show_numbers, chat_id, message_id, user_id, 1, True)
+            self._run_async(self.show_numbers, chat_id, message_id, user_id, 1, True, None)
+            return
+
+        if data == "numbers_show_custom":
+            self.edit_text(
+                chat_id,
+                message_id,
+                self._title_numbers(user_id) + "\n" + self._tr(user_id, "اختر الحساب لعرض الأرقام.", "Choose account to show numbers."),
+                self.kb_account_picker(user_id, "numbers_show_acc", back_callback="numbers_show"),
+            )
+            return
+
+        if data.startswith("numbers_show_acc:"):
+            account_name = self._account_name_by_pick(data.split(":", 1)[1])
+            if not account_name:
+                self.answer_callback(callback_id, self._tr(user_id, "اختيار حساب غير صالح.", "Invalid account selection."))
+                return
+            self.user_numbers_view_account[user_id] = account_name
+            self._show_loading(chat_id, message_id, NUMBERS_TITLE, self._tr(user_id, "⏳ جاري تحميل الأرقام...", "⏳ Loading numbers..."), "numbers_show", user_id)
+            self._run_async(self.show_numbers, chat_id, message_id, user_id, 1, True, account_name)
             return
 
         if data.startswith("numbers_nav:"):
@@ -1945,7 +2192,8 @@ class PanelBot:
             except Exception:
                 page = 1
             self._show_loading(chat_id, message_id, NUMBERS_TITLE, self._tr(user_id, "⏳ جاري تحميل الصفحة...", "⏳ Loading page..."), "numbers_menu", user_id)
-            self._run_async(self.show_numbers, chat_id, message_id, user_id, page, False)
+            account_name = self.user_numbers_view_account.get(user_id)
+            self._run_async(self.show_numbers, chat_id, message_id, user_id, page, False, account_name)
             return
 
         if data == "numbers_export_menu":
@@ -2050,18 +2298,34 @@ class PanelBot:
             return
 
         if data == "numbers_request":
+            self.edit_text(
+                chat_id,
+                message_id,
+                self._title_numbers(user_id) + "\n" + self._tr(user_id, "اختر الحساب لتنفيذ طلب الأرقام.", "Choose account to request numbers."),
+                self.kb_account_picker(user_id, "numbers_req_acc", back_callback="numbers_menu"),
+            )
+            return
+
+        if data.startswith("numbers_req_acc:"):
+            account_name = self._account_name_by_pick(data.split(":", 1)[1])
+            if not account_name:
+                self.answer_callback(callback_id, self._tr(user_id, "اختيار حساب غير صالح.", "Invalid account selection."))
+                return
             store = self.load_ranges_store()
             hint_rows: list[str] = []
             ranges = store.get("ranges") if isinstance(store.get("ranges"), dict) else {}
             for rname, entry in list(ranges.items())[:10]:
                 if not isinstance(entry, dict):
                     continue
-                req = int(entry.get("requested_total", 0) or 0)
-                rem = self.range_limit_total() - req
-                hint_rows.append(self._tr(user_id, f"- {rname} | المتبقي: {max(0, rem)}", f"- {rname} | remaining: {max(0, rem)}"))
+                rem = self._range_remaining(str(rname), account_name)
+                hint_rows.append(self._tr(user_id, f"- {rname} | المتبقي: {rem}", f"- {rname} | remaining: {rem}"))
             hint = "\n".join(hint_rows) if hint_rows else self._tr(user_id, "لا توجد رينجات محفوظة بعد.", "No saved ranges yet.")
-            self.set_state(user_id, "wait_range_name")
-            self.send_text(chat_id, self._tr(user_id, "اكتب اسم الرينج للطلب:\n\n", "Type range name to request:\n\n") + hint)
+            self.set_state(user_id, "wait_range_name", {"account": account_name})
+            self.send_text(
+                chat_id,
+                self._tr(user_id, f"الحساب المختار: {account_name}\nاكتب اسم الرينج للطلب:\n\n", f"Selected account: {account_name}\nType range name to request:\n\n")
+                + hint,
+            )
             return
 
         if data == "numbers_delete":
@@ -2341,8 +2605,16 @@ class PanelBot:
                 return
             self.clear_state(user_id)
             self.mark_runtime_change()
-            self.send_text(chat_id, self._tr(user_id, "تمت إضافة الأدمن بنجاح.", "Admin added successfully."))
-            self.show_main(chat_id, user_id)
+            admins_txt = ", ".join(str(x) for x in self.get_runtime_admin_ids()) or "-"
+            self.send_text(
+                chat_id,
+                self._tr(
+                    user_id,
+                    f"تمت إضافة الأدمن بنجاح.\nالأدمن الحاليين:\n{admins_txt}",
+                    f"Admin added successfully.\nCurrent admins:\n{admins_txt}",
+                ),
+                self.kb_admins_menu(user_id),
+            )
             return
 
         if mode == "wait_add_account":
@@ -2424,23 +2696,29 @@ class PanelBot:
 
         if mode == "wait_range_name":
             range_name = text
-            store = self.load_ranges_store()
-            entry = self.range_entry(store, range_name)
-            req = int(entry.get("requested_total", 0) or 0)
-            remain = max(0, self.range_limit_total() - req)
-            self.set_state(user_id, "wait_range_count", {"range": range_name, "remaining": remain})
-            self.send_text(chat_id, self._tr(user_id, f"اكتب العدد المطلوب (مضاعف 50).\nالمتبقي للرينج {range_name}: {remain}", f"Type requested count (multiple of 50).\nRemaining for range {range_name}: {remain}"))
+            account_name = str(data.get("account") or "").strip()
+            remain = self._range_remaining(range_name, account_name or None)
+            self.set_state(user_id, "wait_range_count", {"range": range_name, "remaining": remain, "account": account_name})
+            self.send_text(
+                chat_id,
+                self._tr(
+                    user_id,
+                    f"الحساب: {account_name}\nاكتب العدد المطلوب (مضاعف 50).\nالمتبقي للرينج {range_name}: {remain}",
+                    f"Account: {account_name}\nType requested count (multiple of 50).\nRemaining for range {range_name}: {remain}",
+                ),
+            )
             return
 
         if mode == "wait_range_count":
             range_name = str(data.get("range") or "")
+            account_name = str(data.get("account") or "").strip()
             if not text.isdigit():
                 self.send_text(chat_id, self._tr(user_id, "العدد لازم يكون رقم صحيح.", "Count must be a valid integer."))
                 return
             count = int(text)
             self.clear_state(user_id)
             self.send_text(chat_id, self._tr(user_id, "جاري تنفيذ طلب الأرقام...", "Processing number request..."))
-            self._run_async(self._process_range_request, chat_id, user_id, range_name, count)
+            self._run_async(self._process_range_request, chat_id, user_id, range_name, count, account_name or None)
             return
 
         if mode == "wait_delete_numbers":

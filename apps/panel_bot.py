@@ -137,7 +137,7 @@ class PanelBot:
         return cfg if isinstance(cfg, dict) else {}
 
     def _save_runtime_cfg(self, cfg: dict[str, Any]) -> None:
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        now = self._now_marker()
         cfg["updated_at"] = now
         cfg["bot_restart_requested_at"] = now
         self.save_json(RUNTIME_CONFIG_FILE, cfg)
@@ -146,10 +146,14 @@ class PanelBot:
         cfg = self.load_json(RUNTIME_CONFIG_FILE, {})
         if not isinstance(cfg, dict):
             cfg = {}
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        now = self._now_marker()
         cfg["updated_at"] = now
         cfg["bot_restart_requested_at"] = now
         self.save_json(RUNTIME_CONFIG_FILE, cfg)
+
+    def _now_marker(self) -> str:
+        # Use microseconds so repeated actions in the same second still trigger.
+        return datetime.now().isoformat(sep=" ", timespec="microseconds")
 
     def refresh_runtime_settings(self) -> None:
         cfg = self._load_runtime_cfg()
@@ -299,9 +303,15 @@ class PanelBot:
         cfg = self.load_json(RUNTIME_CONFIG_FILE, {})
         if not isinstance(cfg, dict):
             cfg = {}
-        cfg["messages_update_requested_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        cfg["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        now = self._now_marker()
+        cfg["messages_update_requested_at"] = now
+        cfg["updated_at"] = now
         self.save_json(RUNTIME_CONFIG_FILE, cfg)
+
+    def mark_runtime_change(self) -> None:
+        # Unified marker update for any runtime-affecting change.
+        self.request_bot_restart()
+        self.request_messages_refresh()
 
     def fetch_codes_enabled(self) -> bool:
         data = self.load_json(RUNTIME_CONFIG_FILE, {"fetch_codes_enabled": True})
@@ -1737,6 +1747,7 @@ class PanelBot:
         if data == "toggle_fetch":
             enabled = self.fetch_codes_enabled()
             self.set_fetch_codes_enabled(not enabled)
+            self.mark_runtime_change()
             self.show_main(chat_id, user_id, message_id)
             return
 
@@ -1792,8 +1803,7 @@ class PanelBot:
             return
 
         if data in {"var_reload", "var_restart"}:
-            self.request_bot_restart()
-            self.request_messages_refresh()
+            self.mark_runtime_change()
             self.answer_callback(callback_id, self._tr(user_id, "تم طلب إعادة تشغيل البوت.", "Bot restart requested."))
             self.show_variables(chat_id, message_id, user_id)
             return
@@ -2300,7 +2310,7 @@ class PanelBot:
                 self.send_text(chat_id, self._tr(user_id, "صيغة غير صحيحة. اكتب YYYY-MM-DD", "Invalid format. Use YYYY-MM-DD"))
                 return
             self.clear_state(user_id)
-            self.request_messages_refresh()
+            self.mark_runtime_change()
             self.send_text(chat_id, self._tr(user_id, f"تم حفظ Start Date: {text}", f"Start Date saved: {text}"))
             self.show_main(chat_id, user_id)
             return
@@ -2310,7 +2320,7 @@ class PanelBot:
                 self.send_text(chat_id, self._tr(user_id, "صيغة URL غير صحيحة. اكتب http://... أو https://...", "Invalid URL. Use http://... or https://..."))
                 return
             self.clear_state(user_id)
-            self.request_messages_refresh()
+            self.mark_runtime_change()
             self.send_text(chat_id, self._tr(user_id, f"تم حفظ API URL: {self.get_runtime_api_base()}", f"API URL saved: {self.get_runtime_api_base()}"))
             self.show_main(chat_id, user_id)
             return
@@ -2320,7 +2330,7 @@ class PanelBot:
                 self.send_text(chat_id, self._tr(user_id, "القيمة غير صحيحة. اكتب 0 (بدون حد) أو رقمًا صحيحًا.", "Invalid value. Send 0 (unlimited) or a valid number."))
                 return
             self.clear_state(user_id)
-            self.request_messages_refresh()
+            self.mark_runtime_change()
             self.send_text(chat_id, self._tr(user_id, f"تم حفظ BOT LIMIT: {self.get_runtime_bot_limit()}", f"BOT LIMIT saved: {self.get_runtime_bot_limit()}"))
             self.show_main(chat_id, user_id)
             return
@@ -2330,6 +2340,7 @@ class PanelBot:
                 self.send_text(chat_id, self._tr(user_id, "ID غير صحيح.", "Invalid ID."))
                 return
             self.clear_state(user_id)
+            self.mark_runtime_change()
             self.send_text(chat_id, self._tr(user_id, "تمت إضافة الأدمن بنجاح.", "Admin added successfully."))
             self.show_main(chat_id, user_id)
             return

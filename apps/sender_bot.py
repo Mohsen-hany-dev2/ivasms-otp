@@ -144,10 +144,20 @@ def load_platforms() -> dict[str, str]:
     rows = load_json_list(PLATFORMS_FILE)
     out: dict[str, str] = {}
     for r in rows:
-        key = str(r.get("key", "")).strip().lower()
+        key = normalize_service_key(str(r.get("key", "")))
         short = str(r.get("short", "")).strip()
         if key and short:
             out[key] = short
+    # Safety fallback when platforms store is missing.
+    if not out:
+        out = {
+            "whatsapp": "WA",
+            "telegram": "TG",
+            "facebook": "FB",
+            "instagram": "IG",
+            "twitter": "X",
+            "tiktok": "TT",
+        }
     return out
 
 
@@ -228,28 +238,41 @@ def iso_to_flag(iso2: str) -> str:
 
 
 def service_short(service_name: str, platforms: dict[str, str]) -> str:
-    key = (service_name or "").strip().lower()
+    key = normalize_service_key(service_name)
     if key in platforms:
         return str(platforms[key]).upper()
-    return (service_name[:2] or "NA").upper()
+    # Better fallback for common services
+    if "whatsapp" in key or key == "wa":
+        return "WA"
+    if "telegram" in key or key == "tg":
+        return "TG"
+    if "facebook" in key or key == "fb":
+        return "FB"
+    return ((service_name or "")[:2] or "NA").upper()
 
 
 def service_emoji_id(service_name: str, platform_rows: list[dict]) -> str:
-    key = (service_name or "").strip().lower()
+    key = normalize_service_key(service_name)
     for row in platform_rows:
-        if str(row.get("key", "")).strip().lower() == key:
+        if normalize_service_key(str(row.get("key", ""))) == key:
             return str(row.get("emoji_id", "")).strip()
     return ""
 
 
 def service_emoji_alt(service_name: str, platform_rows: list[dict]) -> str:
-    key = (service_name or "").strip().lower()
+    key = normalize_service_key(service_name)
     for row in platform_rows:
-        if str(row.get("key", "")).strip().lower() == key:
+        if normalize_service_key(str(row.get("key", ""))) == key:
             alt = str(row.get("emoji", "")).strip()
             if alt:
                 return alt
     return "✨"
+
+
+def normalize_service_key(value: str) -> str:
+    s = str(value or "").strip().lower()
+    # remove separators and punctuation so "Whats App", "whats-app", etc. match.
+    return re.sub(r"[^a-z0-9]+", "", s)
 
 
 def extract_code(message: str) -> str:
@@ -813,10 +836,8 @@ def run_loop(start_date: str, api_base: str, api_token: str, tg_token: str, targ
             platform_rows = load_json_list(PLATFORMS_FILE)
             platforms = load_platforms()
             accounts = load_accounts()
-            refreshed_groups = load_groups()
-            if refreshed_groups:
-                current_target_groups = refreshed_groups
-                invalid_groups.clear()
+            current_target_groups = load_groups()
+            invalid_groups.clear()
             token_cache = load_token_cache()
             account_tokens = {}
             # Reload persisted message state immediately after runtime updates
@@ -843,6 +864,14 @@ def run_loop(start_date: str, api_base: str, api_token: str, tg_token: str, targ
         if not is_fetch_codes_enabled():
             if _should_log("fetch_paused", throttle_seconds=120):
                 logger.info("fetch codes is paused by runtime config")
+            if once:
+                return
+            time.sleep(current_poll_interval)
+            continue
+
+        if not current_target_groups:
+            if _should_log("no_groups_configured", throttle_seconds=120):
+                logger.warning("no groups configured; skipping send cycle")
             if once:
                 return
             time.sleep(current_poll_interval)
@@ -1054,19 +1083,13 @@ def main() -> None:
     default_start = runtime_start_date(os.getenv("API_START_DATE", "2025-01-01").strip())
     default_api_token = runtime_api_session_token(os.getenv("API_SESSION_TOKEN", "").strip())
     default_tg_token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-    default_chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
     default_limit = str(runtime_bot_limit(int(str(os.getenv("BOT_LIMIT", "30") or "30").strip() or "30")))
 
     print("=== NumPlus Telegram Bot Client ===")
     if args.no_input:
         api_base = (default_api if is_real_value(default_api) else "http://127.0.0.1:8000").rstrip("/")
         tg_token = default_tg_token.strip()
-        groups = load_groups()
-        if groups:
-            target_groups = groups
-        else:
-            fallback_chat = default_chat_id.strip()
-            target_groups = [{"name": "default_group", "chat_id": fallback_chat}] if fallback_chat else []
+        target_groups = load_groups()
         accounts = load_accounts()
         api_token = default_api_token if is_real_value(default_api_token) else ""
         start_date_raw = default_start or date.today().isoformat()
@@ -1078,12 +1101,7 @@ def main() -> None:
     else:
         api_base = runtime_api_base(default_api if is_real_value(default_api) else "http://127.0.0.1:8000").rstrip("/")
         tg_token = ask_missing("Telegram bot token", default_tg_token)
-        groups = load_groups()
-        if groups:
-            target_groups = groups
-        else:
-            fallback_chat = default_chat_id.strip()
-            target_groups = [{"name": "default_group", "chat_id": fallback_chat}] if fallback_chat else []
+        target_groups = load_groups()
 
         accounts = load_accounts()
         api_token = default_api_token if is_real_value(default_api_token) else ""
@@ -1097,8 +1115,7 @@ def main() -> None:
         logger.error("telegram bot token missing")
         return
     if not target_groups:
-        logger.error("no target groups configured")
-        return
+        logger.warning("no target groups configured at startup; sender will stay idle until groups are added")
 
     check_api_health(api_base)
 

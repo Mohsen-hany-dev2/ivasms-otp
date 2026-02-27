@@ -3035,7 +3035,14 @@ class PanelBot:
 
         if data == "acc_add":
             self.set_state(user_id, "wait_add_account")
-            self.send_text(chat_id, self._tr(user_id, "ارسل الحساب بهذا الشكل: name,email,password", "Send account in this format: name,email,password"))
+            self.send_text(
+                chat_id,
+                self._tr(
+                    user_id,
+                    "ارسل الحساب/الحسابات بهذا الشكل:\nname,email,password\n- يمكن ارسال أكثر من سطر\n- أو ارسل ملف txt/csv/json بنفس التنسيق",
+                    "Send account(s) in this format:\nname,email,password\n- You can send multiple lines\n- Or send txt/csv/json file with same format",
+                ),
+            )
             return
 
         if data == "acc_delete_menu":
@@ -3108,6 +3115,34 @@ class PanelBot:
             seen.add(item)
             out.append(item)
         return out
+
+    def parse_accounts_items(self, raw: str) -> tuple[list[dict[str, Any]], list[str]]:
+        if not raw:
+            return [], []
+        lines = [ln.strip() for ln in str(raw).splitlines() if ln.strip()]
+        parsed: list[dict[str, Any]] = []
+        bad: list[str] = []
+        for line in lines:
+            if line.startswith("#"):
+                continue
+            parts = [x.strip() for x in line.split(",")]
+            if len(parts) < 3:
+                bad.append(line)
+                continue
+            name = parts[0]
+            email = parts[1]
+            password = ",".join(parts[2:]).strip()
+            if not name:
+                name = email
+            if not email or not password:
+                bad.append(line)
+                continue
+            parsed.append({"name": name, "email": email, "password": password, "enabled": True})
+        # Deduplicate by email, keep last row.
+        by_email: dict[str, dict[str, Any]] = {}
+        for row in parsed:
+            by_email[str(row.get("email", "")).strip().lower()] = row
+        return list(by_email.values()), bad
 
     def handle_text_message(self, msg: dict[str, Any]) -> None:
         chat = msg.get("chat") or {}
@@ -3346,17 +3381,35 @@ class PanelBot:
             return
 
         if mode == "wait_add_account":
-            parts = [x.strip() for x in text.split(",")]
-            if len(parts) < 3:
-                self.send_text(chat_id, self._tr(user_id, "الصيغة غير صحيحة. المطلوب: name,email,password", "Invalid format. Expected: name,email,password"))
+            rows_in, bad = self.parse_accounts_items(text)
+            if not rows_in:
+                self.send_text(chat_id, self._tr(user_id, "الصيغة غير صحيحة. المطلوب لكل سطر: name,email,password", "Invalid format. Expected per line: name,email,password"))
                 return
-            name, email, password = parts[0], parts[1], ",".join(parts[2:]).strip()
             rows = self.load_accounts()
-            rows = [x for x in rows if str(x.get("email", "")).strip() != email]
-            rows.append({"name": name, "email": email, "password": password, "enabled": True})
+            old_by_email = {str(x.get("email", "")).strip().lower(): x for x in rows}
+            added = 0
+            updated = 0
+            for row in rows_in:
+                email_key = str(row.get("email", "")).strip().lower()
+                if email_key in old_by_email:
+                    updated += 1
+                else:
+                    added += 1
+                old_by_email[email_key] = row
+            rows = list(old_by_email.values())
             self.save_accounts(rows)
             self.clear_state(user_id)
-            self.send_text(chat_id, self._tr(user_id, f"تمت إضافة الحساب: {email}", f"Account added: {email}"))
+            bad_note = ""
+            if bad:
+                bad_note = "\n" + self._tr(user_id, f"أسطر غير صالحة: {len(bad)}", f"Invalid lines: {len(bad)}")
+            self.send_text(
+                chat_id,
+                self._tr(
+                    user_id,
+                    f"تم حفظ الحسابات.\nمضاف: {added}\nمحدّث: {updated}{bad_note}",
+                    f"Accounts saved.\nAdded: {added}\nUpdated: {updated}{bad_note}",
+                ),
+            )
             self.show_main(chat_id, user_id)
             return
 
@@ -3478,8 +3531,9 @@ class PanelBot:
         if not self.is_admin(user_id):
             return
         state = self.get_state(user_id)
-        if not state or state.get("mode") != "wait_delete_numbers":
-            self.send_text(chat_id, self._tr(user_id, "الملف تم استلامه، لكن لا يوجد عملية حذف قيد الانتظار.", "File received, but there is no pending delete operation."))
+        mode = str((state or {}).get("mode") or "")
+        if mode not in {"wait_delete_numbers", "wait_add_account"}:
+            self.send_text(chat_id, self._tr(user_id, "الملف تم استلامه، لكن لا يوجد عملية قيد الانتظار.", "File received, but there is no pending operation."))
             return
 
         doc = msg.get("document") or {}
@@ -3489,10 +3543,42 @@ class PanelBot:
             return
 
         content = self.get_file_content(file_id)
-        items = self.parse_delete_items(content)
+        if mode == "wait_delete_numbers":
+            items = self.parse_delete_items(content)
+            self.clear_state(user_id)
+            self.send_text(chat_id, self._tr(user_id, "جاري حذف الأرقام من الملف...", "Deleting numbers from file..."))
+            self._run_async(self._process_delete_request, chat_id, user_id, items)
+            return
+
+        rows_in, bad = self.parse_accounts_items(content)
+        if not rows_in:
+            self.send_text(chat_id, self._tr(user_id, "الملف لا يحتوي حسابات صالحة.", "The file contains no valid accounts."))
+            return
+        rows = self.load_accounts()
+        old_by_email = {str(x.get("email", "")).strip().lower(): x for x in rows}
+        added = 0
+        updated = 0
+        for row in rows_in:
+            email_key = str(row.get("email", "")).strip().lower()
+            if email_key in old_by_email:
+                updated += 1
+            else:
+                added += 1
+            old_by_email[email_key] = row
+        self.save_accounts(list(old_by_email.values()))
         self.clear_state(user_id)
-        self.send_text(chat_id, self._tr(user_id, "جاري حذف الأرقام من الملف...", "Deleting numbers from file..."))
-        self._run_async(self._process_delete_request, chat_id, user_id, items)
+        bad_note = ""
+        if bad:
+            bad_note = "\n" + self._tr(user_id, f"أسطر غير صالحة: {len(bad)}", f"Invalid lines: {len(bad)}")
+        self.send_text(
+            chat_id,
+            self._tr(
+                user_id,
+                f"تمت إضافة الحسابات من الملف.\nمضاف: {added}\nمحدّث: {updated}{bad_note}",
+                f"Accounts imported from file.\nAdded: {added}\nUpdated: {updated}{bad_note}",
+            ),
+        )
+        self.show_main(chat_id, user_id)
 
     # -------------------------- update router --------------------------
     def process_update(self, update: dict[str, Any]) -> None:

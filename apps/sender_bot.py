@@ -315,11 +315,14 @@ def build_message(item: dict, countries: list[dict[str, str]], platforms: dict[s
     country = detect_country(raw_number, countries)
     iso2 = country.get("iso2", "UN")
     flag = iso_to_flag(iso2)
+    cemoji_id = str(country.get("emoji_id", "")).strip()
+    cemoji_alt = str(country.get("emoji", "")).strip() or flag
     message_text = str(item.get("message", "")).strip()
-    escaped_head = _md_escape(f"{short} {iso2} {flag} {number_display}")
+    escaped_head = _md_escape(f"{short} {iso2} {number_display}")
     escaped_msg = _md_code_escape(message_text)
-    custom = f"![{semoji_alt}](tg://emoji?id={semoji_id}) " if (use_custom_emoji and semoji_id) else f"{semoji_alt} "
-    return f"> {custom}*{escaped_head}*\n```\n{escaped_msg}\n```"
+    custom_service = f"![{semoji_alt}](tg://emoji?id={semoji_id})" if (use_custom_emoji and semoji_id) else semoji_alt
+    custom_country = f"![{cemoji_alt}](tg://emoji?id={cemoji_id})" if (use_custom_emoji and cemoji_id) else cemoji_alt
+    return f"> {custom_service} {custom_country} *{escaped_head}*\n```\n{escaped_msg}\n```"
 
 
 def _md_escape(text: str) -> str:

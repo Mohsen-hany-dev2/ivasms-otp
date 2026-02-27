@@ -13,8 +13,10 @@ from dotenv import load_dotenv
 from app.paths import (
     ACCOUNTS_FILE,
     BASE_DIR,
+    COUNTRY_FILE,
     EXPORT_DIR,
     GROUPS_FILE,
+    PLATFORMS_FILE,
     RANGES_STORE_FILE,
     RUNTIME_CONFIG_FILE,
 )
@@ -22,7 +24,7 @@ from app.storage import clear_daily_store, get_daily_store, list_daily_store_day
 from app.storage import load_json as db_load_json, save_json as db_save_json
 
 
-MAIN_TITLE = "༺═════⇓ لوحة التحكم ⇓═════༻"
+MAIN_TITLE = "༺═══⇓ لوحة التحكم ⇓═══༻"
 TRAFFIC_TITLE = "༺═════⇓ الترافيك ⇓═════༻"
 NUMBERS_TITLE = "༺═════⇓ الأرقام ⇓═════༻"
 ACCOUNTS_TITLE = "༺═════⇓ حساباتي ⇓═════༻"
@@ -51,6 +53,7 @@ class PanelBot:
         self.user_traffic_cache: dict[int, dict[str, list[dict[str, str]]]] = {}
         self.user_numbers_cache: dict[int, dict[str, list[dict[str, str]]]] = {}
         self.user_numbers_view_account: dict[int, str | None] = {}
+        self.user_view_rev: dict[int, int] = {}
         self.user_lang: dict[int, str] = {}
 
         if not self.bot_token:
@@ -89,6 +92,20 @@ class PanelBot:
     def is_admin(self, user_id: int) -> bool:
         return int(user_id or 0) in self.admin_ids
 
+    def is_primary_admin(self, user_id: int) -> bool:
+        # Main owner/admin account only.
+        return int(user_id or 0) == min(DEFAULT_ADMIN_IDS)
+
+    def bump_view_rev(self, user_id: int) -> int:
+        uid = int(user_id)
+        self.user_view_rev[uid] = int(self.user_view_rev.get(uid, 0)) + 1
+        return self.user_view_rev[uid]
+
+    def is_view_current(self, user_id: int, view_rev: int | None) -> bool:
+        if view_rev is None:
+            return True
+        return int(self.user_view_rev.get(int(user_id), 0)) == int(view_rev)
+
     # -------------------------- files/json --------------------------
     def load_json(self, path: Path, fallback: Any) -> Any:
         return db_load_json(path, fallback)
@@ -118,6 +135,8 @@ class PanelBot:
             data["fetch_codes_enabled"] = True
         if "messages_start_date" not in data:
             data["messages_start_date"] = os.getenv("API_START_DATE", "2025-01-01").strip() or "2025-01-01"
+        if "messages_start_date_auto_today" not in data:
+            data["messages_start_date_auto_today"] = False
         if "start_date_prompt_pending" not in data:
             data["start_date_prompt_pending"] = not self._is_valid_day(str(data.get("messages_start_date", "")).strip())
         if "api_base_url" not in data:
@@ -131,6 +150,8 @@ class PanelBot:
             data["panel_admin_ids"] = env_admins
         if not isinstance(data.get("language_overrides"), dict):
             data["language_overrides"] = {}
+        if not isinstance(data.get("managed_bots"), list):
+            data["managed_bots"] = []
         self.save_json(RUNTIME_CONFIG_FILE, data)
 
     def _load_runtime_cfg(self) -> dict[str, Any]:
@@ -295,6 +316,13 @@ class PanelBot:
     def get_runtime_start_date(self) -> str:
         cfg = self.load_json(RUNTIME_CONFIG_FILE, {})
         raw = str(cfg.get("messages_start_date", "")).strip() if isinstance(cfg, dict) else ""
+        if isinstance(cfg, dict) and bool(cfg.get("messages_start_date_auto_today", False)):
+            today = date.today().strftime("%Y-%m-%d")
+            if raw != today:
+                cfg["messages_start_date"] = today
+                cfg["updated_at"] = self._now_marker()
+                self.save_json(RUNTIME_CONFIG_FILE, cfg)
+                return today
         if self._is_valid_day(raw):
             return raw
         env_default = os.getenv("API_START_DATE", "2025-01-01").strip() or "2025-01-01"
@@ -323,8 +351,78 @@ class PanelBot:
         if not isinstance(cfg, dict):
             cfg = {}
         cfg["messages_start_date"] = value
+        cfg["messages_start_date_auto_today"] = value == date.today().strftime("%Y-%m-%d")
         cfg["start_date_prompt_pending"] = False
         self._save_runtime_cfg(cfg)
+        return True
+
+    def load_managed_bots(self) -> list[dict[str, Any]]:
+        cfg = self._load_runtime_cfg()
+        rows = cfg.get("managed_bots")
+        if not isinstance(rows, list):
+            return []
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            tok = str(row.get("token", "")).strip()
+            if not tok:
+                continue
+            storage = str(row.get("storage", "private")).strip().lower()
+            if storage not in {"private", "shared"}:
+                storage = "private"
+            out.append(
+                {
+                    "token": tok,
+                    "storage": storage,
+                    "created_by": str(row.get("created_by", "")).strip(),
+                    "created_at": str(row.get("created_at", "")).strip(),
+                }
+            )
+        return out
+
+    def save_managed_bots(self, rows: list[dict[str, Any]]) -> None:
+        cfg = self._load_runtime_cfg()
+        cfg["managed_bots"] = rows
+        self._save_runtime_cfg(cfg)
+
+    def upsert_managed_bot(self, token: str, storage: str, created_by: int) -> None:
+        tok = str(token or "").strip()
+        if not tok:
+            return
+        storage_value = str(storage or "private").strip().lower()
+        if storage_value not in {"private", "shared"}:
+            storage_value = "private"
+        rows = self.load_managed_bots()
+        out: list[dict[str, Any]] = []
+        found = False
+        for row in rows:
+            if str(row.get("token", "")).strip() == tok:
+                row["storage"] = storage_value
+                row["created_by"] = str(created_by)
+                row["created_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                found = True
+            out.append(row)
+        if not found:
+            out.append(
+                {
+                    "token": tok,
+                    "storage": storage_value,
+                    "created_by": str(created_by),
+                    "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                }
+            )
+        self.save_managed_bots(out)
+
+    def delete_managed_bot(self, token: str) -> bool:
+        tok = str(token or "").strip()
+        if not tok:
+            return False
+        rows = self.load_managed_bots()
+        out = [row for row in rows if str(row.get("token", "")).strip() != tok]
+        if len(out) == len(rows):
+            return False
+        self.save_managed_bots(out)
         return True
 
     def request_messages_refresh(self) -> None:
@@ -390,6 +488,53 @@ class PanelBot:
     def save_groups(self, rows: list[dict[str, Any]]) -> None:
         self.save_json(GROUPS_FILE, rows)
         self.request_bot_restart()
+
+    def load_services(self) -> list[dict[str, str]]:
+        rows = self.load_json(PLATFORMS_FILE, [])
+        if not isinstance(rows, list):
+            return []
+        out: list[dict[str, str]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            key = str(row.get("key", "")).strip()
+            short = str(row.get("short", "")).strip()
+            emoji = str(row.get("emoji", "")).strip()
+            emoji_id = str(row.get("emoji_id", "")).strip()
+            if key:
+                out.append({"key": key, "short": short, "emoji": emoji, "emoji_id": emoji_id})
+        return out
+
+    def save_services(self, rows: list[dict[str, str]]) -> None:
+        self.save_json(PLATFORMS_FILE, rows)
+        self.mark_runtime_change()
+
+    def load_countries_store(self) -> list[dict[str, str]]:
+        rows = self.load_json(COUNTRY_FILE, [])
+        if not isinstance(rows, list):
+            return []
+        out: list[dict[str, str]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            dial = str(row.get("dial_code", "")).strip()
+            if not dial:
+                continue
+            out.append(
+                {
+                    "dial_code": dial,
+                    "name_ar": str(row.get("name_ar", "")).strip(),
+                    "name_en": str(row.get("name_en", "")).strip(),
+                    "iso2": str(row.get("iso2", "")).strip().upper(),
+                    "emoji": str(row.get("emoji", "")).strip(),
+                    "emoji_id": str(row.get("emoji_id", "")).strip(),
+                }
+            )
+        return out
+
+    def save_countries_store(self, rows: list[dict[str, str]]) -> None:
+        self.save_json(COUNTRY_FILE, rows)
+        self.mark_runtime_change()
 
     def normalize_group_target(self, raw: str) -> str:
         value = str(raw or "").strip()
@@ -849,10 +994,37 @@ class PanelBot:
         ]
         return self._pattern_rows(buttons, back_callback=back_callback, back_text=self._tr(user_id, "رجوع", "Back"))
 
-    def _range_remaining(self, range_name: str, account_name: str | None = None) -> int:
+    def kb_numbers_request_mode(self, user_id: int) -> list[list[dict[str, Any]]]:
+        buttons = [
+            self._btn(self._tr(user_id, "🎯 تحكم عادي (حساب واحد)", "🎯 Normal Mode (Single Account)"), callback_data="numbers_req_mode_normal", style="primary"),
+            self._btn(self._tr(user_id, "🧩 تحكم متعدد (عدة حسابات)", "🧩 Multi Mode (Multi Accounts)"), callback_data="numbers_req_mode_multi", style="success"),
+        ]
+        return self._pattern_rows(buttons, back_callback="numbers_menu", back_text=self._tr(user_id, "رجوع", "Back"))
+
+    def kb_numbers_req_multi_accounts(self, user_id: int, selected: set[str] | None = None) -> list[list[dict[str, Any]]]:
+        selected = selected or set()
+        names = self._active_account_names()
+        buttons: list[dict[str, Any]] = []
+        for idx, name in enumerate(names, start=1):
+            checked = "✅" if name in selected else "☑️"
+            buttons.append(self._btn(f"{checked} {name}", callback_data=f"numbers_req_multi_toggle:{idx}", style="primary"))
+        buttons.append(self._btn(self._tr(user_id, "✅ تم", "✅ Done"), callback_data="numbers_req_multi_done", style="success"))
+        return self._pattern_rows(buttons, back_callback="numbers_request", back_text=self._tr(user_id, "رجوع", "Back"))
+
+    def _range_remaining(self, range_name: str, account_name: str | None = None, account_names: list[str] | None = None) -> int:
         store = self.load_ranges_store()
         entry = self.range_entry(store, range_name)
         requested = int(entry.get("requested_total", 0) or 0)
+        if account_names:
+            requested = 0
+            accounts = entry.get("accounts") if isinstance(entry.get("accounts"), dict) else {}
+            names_lc = {str(x).strip().lower() for x in account_names if str(x).strip()}
+            for name, row in accounts.items():
+                if not isinstance(row, dict):
+                    continue
+                if str(name).strip().lower() in names_lc:
+                    requested += int(row.get("requested_total", 0) or 0)
+            return max(0, self.range_limit_total() * max(1, len(names_lc)) - requested)
         if account_name:
             accounts = entry.get("accounts") if isinstance(entry.get("accounts"), dict) else {}
             acc_row = accounts.get(account_name) if isinstance(accounts.get(account_name), dict) else {}
@@ -895,8 +1067,11 @@ class PanelBot:
             self._btn(self._tr(user_id, "🗓️ Start Date", "🗓️ Start Date"), callback_data="var_set_start_date", style="primary"),
             self._btn(self._tr(user_id, "📦 BOT LIMIT", "📦 BOT LIMIT"), callback_data="var_set_bot_limit", style="primary"),
             self._btn(self._tr(user_id, "👮 إدارة الأدمن", "👮 Admin Management"), callback_data="var_admins_menu", style="primary"),
+            self._btn(self._tr(user_id, "📢 إعدادات النشر", "📢 Publish Settings"), callback_data="publish_settings_menu", style="primary"),
             self._btn(self._tr(user_id, "🔁 إعادة تشغيل البوت", "🔁 Restart Bot"), callback_data="var_restart", style="danger"),
         ]
+        if self.is_primary_admin(user_id):
+            buttons.insert(4, self._btn(self._tr(user_id, "🤖 إدارة البوتات", "🤖 Bots Management"), callback_data="var_bots_menu", style="primary"))
         return self._pattern_rows(buttons, back_callback="main_menu", back_text=self._tr(user_id, "رجوع", "Back"))
 
     def kb_admins_menu(self, user_id: int) -> list[list[dict[str, Any]]]:
@@ -906,6 +1081,39 @@ class PanelBot:
             self._btn(self._tr(user_id, "📄 عرض الأدمن", "📄 Show Admins"), callback_data="var_admin_list", style="primary"),
         ]
         return self._pattern_rows(buttons, back_callback="vars_menu", back_text=self._tr(user_id, "رجوع", "Back"))
+
+    def kb_bots_mgmt_menu(self, user_id: int) -> list[list[dict[str, Any]]]:
+        buttons = [
+            self._btn(self._tr(user_id, "➕ إضافة بوت", "➕ Add Bot"), callback_data="var_bot_add", style="success"),
+            self._btn(self._tr(user_id, "🗑️ حذف بوت", "🗑️ Delete Bot"), callback_data="var_bot_delete_menu", style="danger"),
+            self._btn(self._tr(user_id, "📄 عرض البوتات", "📄 Show Bots"), callback_data="var_bot_list", style="primary"),
+        ]
+        return self._pattern_rows(buttons, back_callback="vars_menu", back_text=self._tr(user_id, "رجوع", "Back"))
+
+    def kb_publish_settings_menu(self, user_id: int) -> list[list[dict[str, Any]]]:
+        buttons = [
+            self._btn(self._tr(user_id, "🧩 الخدمات", "🧩 Services"), callback_data="publish_services_menu", style="primary"),
+            self._btn(self._tr(user_id, "🌍 البلدان", "🌍 Countries"), callback_data="publish_countries_menu", style="primary"),
+        ]
+        return self._pattern_rows(buttons, back_callback="vars_menu", back_text=self._tr(user_id, "رجوع", "Back"))
+
+    def kb_publish_services_menu(self, user_id: int) -> list[list[dict[str, Any]]]:
+        buttons = [
+            self._btn(self._tr(user_id, "📄 عرض", "📄 Show"), callback_data="publish_services_show", style="primary"),
+            self._btn(self._tr(user_id, "➕ إضافة", "➕ Add"), callback_data="publish_services_add", style="success"),
+            self._btn(self._tr(user_id, "✏️ تعديل", "✏️ Edit"), callback_data="publish_services_edit_menu", style="primary"),
+            self._btn(self._tr(user_id, "🗑️ حذف", "🗑️ Delete"), callback_data="publish_services_delete_menu", style="danger"),
+        ]
+        return self._pattern_rows(buttons, back_callback="publish_settings_menu", back_text=self._tr(user_id, "رجوع", "Back"))
+
+    def kb_publish_countries_menu(self, user_id: int) -> list[list[dict[str, Any]]]:
+        buttons = [
+            self._btn(self._tr(user_id, "📄 عرض", "📄 Show"), callback_data="publish_countries_show", style="primary"),
+            self._btn(self._tr(user_id, "➕ إضافة", "➕ Add"), callback_data="publish_countries_add", style="success"),
+            self._btn(self._tr(user_id, "✏️ تعديل", "✏️ Edit"), callback_data="publish_countries_edit_menu", style="primary"),
+            self._btn(self._tr(user_id, "🗑️ حذف", "🗑️ Delete"), callback_data="publish_countries_delete_menu", style="danger"),
+        ]
+        return self._pattern_rows(buttons, back_callback="publish_settings_menu", back_text=self._tr(user_id, "رجوع", "Back"))
 
     def kb_back_main(self, user_id: int) -> list[list[dict[str, Any]]]:
         return [[self._btn(self._tr(user_id, "رجوع", "Back"), callback_data="main_menu", style="primary")]]
@@ -1127,7 +1335,14 @@ class PanelBot:
             }
         return ranges[range_name]
 
-    def request_numbers_for_range(self, user_id: int, range_name: str, count: int, account_name: str | None = None) -> str:
+    def request_numbers_for_range(
+        self,
+        user_id: int,
+        range_name: str,
+        count: int,
+        account_name: str | None = None,
+        account_names: list[str] | None = None,
+    ) -> str:
         range_name = str(range_name or "").strip()
         if not range_name:
             return self._tr(user_id, "اسم الرينج مطلوب.", "Range name is required.")
@@ -1137,12 +1352,23 @@ class PanelBot:
         store = self.load_ranges_store()
         entry = self.range_entry(store, range_name)
 
-        max_total = self.range_limit_total()
+        selected_names: list[str] = []
+        if account_names:
+            selected_names = [str(x).strip() for x in account_names if str(x).strip()]
+        elif account_name:
+            selected_names = [str(account_name).strip()]
+
+        max_total = self.range_limit_total() * max(1, len(selected_names))
         already = int(entry.get("requested_total", 0) or 0)
-        if account_name:
+        if selected_names:
             accounts_map = entry.get("accounts") if isinstance(entry.get("accounts"), dict) else {}
-            acc_row = accounts_map.get(account_name) if isinstance(accounts_map.get(account_name), dict) else {}
-            already = int(acc_row.get("requested_total", 0) or 0)
+            already = 0
+            names_lc = {x.lower() for x in selected_names}
+            for n, acc_row in accounts_map.items():
+                if not isinstance(acc_row, dict):
+                    continue
+                if str(n).strip().lower() in names_lc:
+                    already += int(acc_row.get("requested_total", 0) or 0)
         remaining = max_total - already
         if remaining <= 0:
             return self._tr(user_id, f"الرينج {range_name} وصل الحد الأقصى ({max_total}).", f"Range {range_name} reached max limit ({max_total}).")
@@ -1155,20 +1381,27 @@ class PanelBot:
             return self._tr(user_id, f"العدد المطلوب {count} أكبر من المتبقي {remaining}. المسموح الآن {allowed}.", f"Requested {count} is greater than remaining {remaining}. Allowed now: {allowed}.")
 
         targets = self.resolve_targets()
-        if account_name:
-            target_name = str(account_name).strip().lower()
-            targets = [row for row in targets if str(row[0]).strip().lower() == target_name]
+        if selected_names:
+            names_lc = {x.lower() for x in selected_names}
+            targets = [row for row in targets if str(row[0]).strip().lower() in names_lc]
         if not targets:
             return self._tr(user_id, "الحساب غير متاح أو لا يوجد توكن صالح لتنفيذ الطلب.", "Selected account is not available or has no valid token.")
 
         calls_needed = count // 50
+        calls_by_account: dict[str, int] = {name: 0 for name, _tok in targets}
+        for idx in range(calls_needed):
+            name, _tok = targets[idx % len(targets)]
+            calls_by_account[name] = int(calls_by_account.get(name, 0)) + 1
         summary: list[str] = []
         total_success = 0
 
         for name, token in targets:
             success_calls = 0
             last_err = ""
-            for _idx in range(1, calls_needed + 1):
+            account_calls = int(calls_by_account.get(name, 0))
+            if account_calls <= 0:
+                continue
+            for _idx in range(1, account_calls + 1):
                 ok, _payload, req_err = self.api_post("/api/v1/order/range", {"token": token, "range_name": range_name}, timeout=90)
                 if ok:
                     success_calls += 1
@@ -1189,11 +1422,12 @@ class PanelBot:
                 accounts[name] = row
                 total_success += requested_numbers
 
-            if success_calls == calls_needed:
-                summary.append(self._tr(user_id, f"{name}: تم طلب {requested_numbers}/{count}", f"{name}: requested {requested_numbers}/{count}"))
+            expected_for_account = account_calls * 50
+            if success_calls == account_calls:
+                summary.append(self._tr(user_id, f"{name}: تم طلب {requested_numbers}/{expected_for_account}", f"{name}: requested {requested_numbers}/{expected_for_account}"))
             else:
                 summary.append(
-                    self._tr(user_id, f"{name}: نجاح جزئي {requested_numbers}/{count}", f"{name}: partial success {requested_numbers}/{count}")
+                    self._tr(user_id, f"{name}: نجاح جزئي {requested_numbers}/{expected_for_account}", f"{name}: partial success {requested_numbers}/{expected_for_account}")
                     + (self._tr(user_id, f" | خطأ: {last_err}", f" | error: {last_err}") if last_err else "")
                 )
 
@@ -1390,8 +1624,13 @@ class PanelBot:
         include_back: bool = True,
         page: int = 1,
         refresh: bool = False,
+        view_rev: int | None = None,
     ) -> None:
+        if not self.is_view_current(user_id, view_rev):
+            return
         apps = self.fetch_platforms(refresh=refresh)
+        if not self.is_view_current(user_id, view_rev):
+            return
         if not apps:
             text = self._tr(user_id, "لا توجد منصات متاحة الآن.", "No platforms available now.")
             kb = self.kb_back_main(user_id)
@@ -1427,10 +1666,16 @@ class PanelBot:
         if message_id is None:
             self.send_text(chat_id, text, kb)
         else:
+            if not self.is_view_current(user_id, view_rev):
+                return
             self.edit_text(chat_id, message_id, text, kb)
 
-    def _render_traffic_menu(self, chat_id: int | str, message_id: int, user_id: int, page: int = 1, refresh: bool = False) -> None:
+    def _render_traffic_menu(self, chat_id: int | str, message_id: int, user_id: int, page: int = 1, refresh: bool = False, view_rev: int | None = None) -> None:
+        if not self.is_view_current(user_id, view_rev):
+            return
         apps = self.fetch_platforms(refresh=refresh)
+        if not self.is_view_current(user_id, view_rev):
+            return
         per_page = 10
         total = len(apps)
         total_pages = max(1, (total + per_page - 1) // per_page)
@@ -1457,9 +1702,13 @@ class PanelBot:
         kb.append([self._btn(self._tr(user_id, "رجوع", "Back"), callback_data="main_menu", style="primary")])
 
         text = self._title_traffic(user_id) + "\n" + self._tr(user_id, "اختر منصة لعرض الترافيك.", "Choose a platform to view traffic.")
+        if not self.is_view_current(user_id, view_rev):
+            return
         self.edit_text(chat_id, message_id, text, kb)
 
-    def _render_traffic_rows(self, chat_id: int | str, message_id: int, user_id: int, app_name: str, rows: list[dict[str, str]], page: int = 1) -> None:
+    def _render_traffic_rows(self, chat_id: int | str, message_id: int, user_id: int, app_name: str, rows: list[dict[str, str]], page: int = 1, view_rev: int | None = None) -> None:
+        if not self.is_view_current(user_id, view_rev):
+            return
         per_page = 10
         total = len(rows)
         total_pages = max(1, (total + per_page - 1) // per_page)
@@ -1500,6 +1749,8 @@ class PanelBot:
         buttons.append(nav_row)
 
         buttons.append([self._btn(self._tr(user_id, "رجوع", "Back"), callback_data="traffic_menu", style="primary")])
+        if not self.is_view_current(user_id, view_rev):
+            return
         self.edit_text(chat_id, message_id, "\n".join(text_lines), buttons)
 
     def show_traffic_for_app(
@@ -1510,7 +1761,10 @@ class PanelBot:
         app_name: str,
         page: int = 1,
         refresh: bool = False,
+        view_rev: int | None = None,
     ) -> None:
+        if not self.is_view_current(user_id, view_rev):
+            return
         if refresh:
             rows = self.fetch_traffic(app_name, refresh=True)
             self._set_user_traffic_rows(user_id, app_name, rows)
@@ -1519,7 +1773,9 @@ class PanelBot:
             if not rows:
                 rows = self.fetch_traffic(app_name, refresh=True)
                 self._set_user_traffic_rows(user_id, app_name, rows)
-        self._render_traffic_rows(chat_id, message_id, user_id, app_name, rows, page)
+        if not self.is_view_current(user_id, view_rev):
+            return
+        self._render_traffic_rows(chat_id, message_id, user_id, app_name, rows, page, view_rev)
 
     def _mask_id(self, value: str) -> str:
         v = str(value or "").strip()
@@ -1535,7 +1791,10 @@ class PanelBot:
         page: int = 1,
         refresh: bool = False,
         account_name: str | None = None,
+        view_rev: int | None = None,
     ) -> None:
+        if not self.is_view_current(user_id, view_rev):
+            return
         scope_key = "all" if not account_name else f"acc:{str(account_name).strip().lower()}"
         if refresh:
             rows = self.fetch_numbers(account_name=account_name)
@@ -1545,6 +1804,8 @@ class PanelBot:
             if not rows:
                 rows = self.fetch_numbers(account_name=account_name)
                 self._set_user_numbers_rows(user_id, rows, scope=scope_key)
+        if not self.is_view_current(user_id, view_rev):
+            return
 
         per_page = 10
         total = len(rows)
@@ -1597,9 +1858,13 @@ class PanelBot:
         kb.append(nav_row)
         kb.append([self._btn(self._tr(user_id, "رجوع", "Back"), callback_data="numbers_menu", style="primary")])
 
+        if not self.is_view_current(user_id, view_rev):
+            return
         self.edit_text(chat_id, message_id, "\n".join(lines), kb)
 
-    def show_balances(self, chat_id: int | str, message_id: int, user_id: int) -> None:
+    def show_balances(self, chat_id: int | str, message_id: int, user_id: int, view_rev: int | None = None) -> None:
+        if not self.is_view_current(user_id, view_rev):
+            return
         rows = self.fetch_balances()
         text = self._q(self._tr(user_id, "༺═════⇓ رصيدي ⇓═════༻", "༺═════⇓ Balances ⇓═════༻"))
         kb: list[list[dict[str, Any]]] = []
@@ -1624,12 +1889,18 @@ class PanelBot:
                 )
 
         kb.append([self._btn(self._tr(user_id, "رجوع", "Back"), callback_data="main_menu", style="primary")])
+        if not self.is_view_current(user_id, view_rev):
+            return
         self.edit_text(chat_id, message_id, text, kb)
 
-    def show_stats(self, chat_id: int | str, message_id: int, user_id: int) -> None:
+    def show_stats(self, chat_id: int | str, message_id: int, user_id: int, view_rev: int | None = None) -> None:
+        if not self.is_view_current(user_id, view_rev):
+            return
         day_keys = sorted(list_daily_store_days())
         if not day_keys:
             text = self._title_stats(user_id) + "\n" + self._tr(user_id, "لا توجد بيانات إحصائيات حتى الآن.", "No statistics data yet.")
+            if not self.is_view_current(user_id, view_rev):
+                return
             self.edit_text(chat_id, message_id, text, self.kb_back_main(user_id))
             return
 
@@ -1685,6 +1956,8 @@ class PanelBot:
             self._tr(user_id, f"🏆 أعلى خدمة: {top_service}", f"🏆 Top service: {top_service}"),
             self._tr(user_id, f"👥 أعلى جروب: {top_group}", f"👥 Top group: {top_group}"),
         ]
+        if not self.is_view_current(user_id, view_rev):
+            return
         self.edit_text(chat_id, message_id, "\n".join(lines), self.kb_back_main(user_id))
 
     def show_saved_messages(self, chat_id: int | str, message_id: int, user_id: int) -> None:
@@ -1859,8 +2132,9 @@ class PanelBot:
         range_name: str,
         count: int,
         account_name: str | None = None,
+        account_names: list[str] | None = None,
     ) -> None:
-        result = self.request_numbers_for_range(user_id, range_name, count, account_name)
+        result = self.request_numbers_for_range(user_id, range_name, count, account_name, account_names)
         self.send_text(chat_id, result)
         self.show_main(chat_id, user_id)
 
@@ -1908,6 +2182,7 @@ class PanelBot:
             return
         if data == "main_menu":
             self.clear_state(user_id)
+            self.bump_view_rev(user_id)
             self.show_main(chat_id, user_id, message_id)
             return
         if data == "toggle_fetch":
@@ -2024,6 +2299,256 @@ class PanelBot:
             )
             return
 
+        if data == "var_bots_menu":
+            if not self.is_primary_admin(user_id):
+                self.answer_callback(callback_id, self._tr(user_id, "غير متاح.", "Not allowed."))
+                return
+            self.edit_text(
+                chat_id,
+                message_id,
+                self._q(self._tr(user_id, "༺═════⇓ إدارة البوتات ⇓═════༻", "༺═════⇓ Bots Management ⇓═════༻"))
+                + "\n"
+                + self._tr(user_id, "اختر العملية.", "Choose an action."),
+                self.kb_bots_mgmt_menu(user_id),
+            )
+            return
+
+        if data == "var_bot_add":
+            if not self.is_primary_admin(user_id):
+                self.answer_callback(callback_id, self._tr(user_id, "غير متاح.", "Not allowed."))
+                return
+            self.set_state(user_id, "wait_new_bot_token")
+            self.send_text(chat_id, self._tr(user_id, "ارسل توكن البوت.", "Send bot token."))
+            return
+
+        if data.startswith("var_bot_store:"):
+            if not self.is_primary_admin(user_id):
+                self.answer_callback(callback_id, self._tr(user_id, "غير متاح.", "Not allowed."))
+                return
+            storage = data.split(":", 1)[1].strip().lower()
+            st = self.get_state(user_id) or {}
+            if st.get("mode") != "wait_new_bot_storage":
+                self.send_text(chat_id, self._tr(user_id, "ابدأ من إدارة البوتات.", "Start from bots management first."))
+                return
+            token = str((st.get("data") or {}).get("token") or "").strip()
+            if not token:
+                self.send_text(chat_id, self._tr(user_id, "التوكن غير صالح.", "Invalid token."))
+                return
+            self.upsert_managed_bot(token, storage, user_id)
+            self.clear_state(user_id)
+            self.mark_runtime_change()
+            self.send_text(chat_id, self._tr(user_id, "تم حفظ البوت.", "Bot saved."), self.kb_bots_mgmt_menu(user_id))
+            return
+
+        if data == "var_bot_list":
+            if not self.is_primary_admin(user_id):
+                self.answer_callback(callback_id, self._tr(user_id, "غير متاح.", "Not allowed."))
+                return
+            rows = self.load_managed_bots()
+            lines = [self._q(self._tr(user_id, "༺═════⇓ إدارة البوتات ⇓═════༻", "༺═════⇓ Bots Management ⇓═════༻"))]
+            if not rows:
+                lines.append(self._tr(user_id, "لا توجد بوتات إضافية.", "No extra bots."))
+            else:
+                for i, row in enumerate(rows, start=1):
+                    tok = str(row.get("token", ""))
+                    masked = f"{tok[:12]}...{tok[-6:]}" if len(tok) > 20 else tok
+                    lines.append(self._tr(user_id, f"{i}. {masked} | التخزين: {row.get('storage')}", f"{i}. {masked} | storage: {row.get('storage')}"))
+            self.edit_text(chat_id, message_id, "\n".join(lines), self.kb_bots_mgmt_menu(user_id))
+            return
+
+        if data == "var_bot_delete_menu":
+            if not self.is_primary_admin(user_id):
+                self.answer_callback(callback_id, self._tr(user_id, "غير متاح.", "Not allowed."))
+                return
+            rows = self.load_managed_bots()
+            buttons: list[dict[str, Any]] = []
+            for idx, row in enumerate(rows, start=1):
+                tok = str(row.get("token", ""))
+                masked = f"{tok[:10]}...{tok[-5:]}" if len(tok) > 16 else tok
+                buttons.append(self._btn(f"🗑️ {masked}", callback_data=f"var_bot_del:{idx}", style="danger"))
+            kb = self._pattern_rows(buttons, back_callback="var_bots_menu", back_text=self._tr(user_id, "رجوع", "Back"))
+            self.edit_text(chat_id, message_id, self._tr(user_id, "اختر البوت المراد حذفه.", "Choose bot to delete."), kb)
+            return
+
+        if data.startswith("var_bot_del:"):
+            if not self.is_primary_admin(user_id):
+                self.answer_callback(callback_id, self._tr(user_id, "غير متاح.", "Not allowed."))
+                return
+            try:
+                idx = int(data.split(":", 1)[1]) - 1
+            except Exception:
+                idx = -1
+            rows = self.load_managed_bots()
+            if idx < 0 or idx >= len(rows):
+                self.answer_callback(callback_id, self._tr(user_id, "اختيار غير صالح.", "Invalid selection."))
+                return
+            tok = str(rows[idx].get("token", "")).strip()
+            if self.delete_managed_bot(tok):
+                self.mark_runtime_change()
+            self.answer_callback(callback_id, self._tr(user_id, "تم حذف البوت.", "Bot deleted."))
+            self.edit_text(chat_id, message_id, self._tr(user_id, "تم التحديث.", "Updated."), self.kb_bots_mgmt_menu(user_id))
+            return
+
+        if data == "publish_settings_menu":
+            self.edit_text(
+                chat_id,
+                message_id,
+                self._q(self._tr(user_id, "༺═════⇓ إعدادات النشر ⇓═════༻", "༺═════⇓ Publish Settings ⇓═════༻"))
+                + "\n"
+                + self._tr(user_id, "اختر القسم.", "Choose section."),
+                self.kb_publish_settings_menu(user_id),
+            )
+            return
+
+        if data == "publish_services_menu":
+            self.edit_text(chat_id, message_id, self._tr(user_id, "إعدادات الخدمات", "Services settings"), self.kb_publish_services_menu(user_id))
+            return
+
+        if data == "publish_countries_menu":
+            self.edit_text(chat_id, message_id, self._tr(user_id, "إعدادات البلدان", "Countries settings"), self.kb_publish_countries_menu(user_id))
+            return
+
+        if data == "publish_services_show":
+            rows = self.load_services()
+            lines = [self._q(self._tr(user_id, "༺═════⇓ الخدمات ⇓═════༻", "༺═════⇓ Services ⇓═════༻"))]
+            if not rows:
+                lines.append(self._tr(user_id, "لا توجد خدمات.", "No services."))
+            else:
+                for i, row in enumerate(rows, start=1):
+                    lines.append(f"{i}. {row.get('key')} | {row.get('short')} | {row.get('emoji') or '-'} | {row.get('emoji_id') or '-'}")
+            self.edit_text(chat_id, message_id, "\n".join(lines), self.kb_publish_services_menu(user_id))
+            return
+
+        if data == "publish_countries_show":
+            rows = self.load_countries_store()
+            lines = [self._q(self._tr(user_id, "༺═════⇓ البلدان ⇓═════༻", "༺═════⇓ Countries ⇓═════༻"))]
+            if not rows:
+                lines.append(self._tr(user_id, "لا توجد بلدان.", "No countries."))
+            else:
+                for i, row in enumerate(rows, start=1):
+                    lines.append(f"{i}. +{row.get('dial_code')} | {row.get('iso2')} | {row.get('name_ar') or row.get('name_en')} | {row.get('emoji') or '-'} | {row.get('emoji_id') or '-'}")
+            self.edit_text(chat_id, message_id, "\n".join(lines), self.kb_publish_countries_menu(user_id))
+            return
+
+        if data == "publish_services_add":
+            self.set_state(user_id, "wait_publish_service_add")
+            self.send_text(chat_id, self._tr(user_id, "ارسل: key,short,emoji(optional),emoji_id(optional)", "Send: key,short,emoji(optional),emoji_id(optional)"))
+            return
+
+        if data == "publish_countries_add":
+            self.set_state(user_id, "wait_publish_country_add")
+            self.send_text(chat_id, self._tr(user_id, "ارسل: dial_code,iso2,name_ar,name_en,emoji(optional),emoji_id(optional)", "Send: dial_code,iso2,name_ar,name_en,emoji(optional),emoji_id(optional)"))
+            return
+
+        if data == "publish_services_delete_menu":
+            rows = self.load_services()
+            buttons = [self._btn(f"🗑️ {row.get('key')}", callback_data=f"publish_service_del:{idx}", style="danger") for idx, row in enumerate(rows, start=1)]
+            kb = self._pattern_rows(buttons, back_callback="publish_services_menu", back_text=self._tr(user_id, "رجوع", "Back"))
+            self.edit_text(chat_id, message_id, self._tr(user_id, "اختر خدمة للحذف.", "Choose service to delete."), kb)
+            return
+
+        if data.startswith("publish_service_del:"):
+            try:
+                idx = int(data.split(":", 1)[1]) - 1
+            except Exception:
+                idx = -1
+            rows = self.load_services()
+            if 0 <= idx < len(rows):
+                rows.pop(idx)
+                self.save_services(rows)
+            self.edit_text(chat_id, message_id, self._tr(user_id, "تم حذف الخدمة.", "Service deleted."), self.kb_publish_services_menu(user_id))
+            return
+
+        if data == "publish_countries_delete_menu":
+            rows = self.load_countries_store()
+            buttons = [self._btn(f"🗑️ +{row.get('dial_code')}", callback_data=f"publish_country_del:{idx}", style="danger") for idx, row in enumerate(rows, start=1)]
+            kb = self._pattern_rows(buttons, back_callback="publish_countries_menu", back_text=self._tr(user_id, "رجوع", "Back"))
+            self.edit_text(chat_id, message_id, self._tr(user_id, "اختر بلد للحذف.", "Choose country to delete."), kb)
+            return
+
+        if data.startswith("publish_country_del:"):
+            try:
+                idx = int(data.split(":", 1)[1]) - 1
+            except Exception:
+                idx = -1
+            rows = self.load_countries_store()
+            if 0 <= idx < len(rows):
+                rows.pop(idx)
+                self.save_countries_store(rows)
+            self.edit_text(chat_id, message_id, self._tr(user_id, "تم حذف البلد.", "Country deleted."), self.kb_publish_countries_menu(user_id))
+            return
+
+        if data == "publish_services_edit_menu":
+            rows = self.load_services()
+            buttons = [self._btn(f"✏️ {row.get('key')}", callback_data=f"publish_service_edit:{idx}", style="primary") for idx, row in enumerate(rows, start=1)]
+            kb = self._pattern_rows(buttons, back_callback="publish_services_menu", back_text=self._tr(user_id, "رجوع", "Back"))
+            self.edit_text(chat_id, message_id, self._tr(user_id, "اختر خدمة للتعديل.", "Choose service to edit."), kb)
+            return
+
+        if data.startswith("publish_service_edit:"):
+            try:
+                idx = int(data.split(":", 1)[1]) - 1
+            except Exception:
+                idx = -1
+            self.set_state(user_id, "wait_publish_service_edit_field", {"index": idx})
+            kb = self._pattern_rows(
+                [
+                    self._btn(self._tr(user_id, "الاسم", "Name"), callback_data="publish_service_field:key", style="primary"),
+                    self._btn(self._tr(user_id, "الايموجي", "Emoji"), callback_data="publish_service_field:emoji", style="primary"),
+                ],
+                back_callback="publish_services_menu",
+                back_text=self._tr(user_id, "رجوع", "Back"),
+            )
+            self.edit_text(chat_id, message_id, self._tr(user_id, "اختر نوع التعديل.", "Choose edit field."), kb)
+            return
+
+        if data.startswith("publish_service_field:"):
+            field = data.split(":", 1)[1].strip().lower()
+            st = self.get_state(user_id) or {}
+            if st.get("mode") != "wait_publish_service_edit_field":
+                return
+            payload = st.get("data") or {}
+            payload["field"] = field
+            self.set_state(user_id, "wait_publish_service_edit_value", payload)
+            self.send_text(chat_id, self._tr(user_id, "ارسل القيمة الجديدة (للايموجي يمكنك: emoji,emoji_id).", "Send new value (for emoji you can send: emoji,emoji_id)."))
+            return
+
+        if data == "publish_countries_edit_menu":
+            rows = self.load_countries_store()
+            buttons = [self._btn(f"✏️ +{row.get('dial_code')}", callback_data=f"publish_country_edit:{idx}", style="primary") for idx, row in enumerate(rows, start=1)]
+            kb = self._pattern_rows(buttons, back_callback="publish_countries_menu", back_text=self._tr(user_id, "رجوع", "Back"))
+            self.edit_text(chat_id, message_id, self._tr(user_id, "اختر بلد للتعديل.", "Choose country to edit."), kb)
+            return
+
+        if data.startswith("publish_country_edit:"):
+            try:
+                idx = int(data.split(":", 1)[1]) - 1
+            except Exception:
+                idx = -1
+            self.set_state(user_id, "wait_publish_country_edit_field", {"index": idx})
+            kb = self._pattern_rows(
+                [
+                    self._btn(self._tr(user_id, "الاسم", "Name"), callback_data="publish_country_field:name", style="primary"),
+                    self._btn(self._tr(user_id, "الاختصار", "Short"), callback_data="publish_country_field:iso2", style="primary"),
+                    self._btn(self._tr(user_id, "الايموجي", "Emoji"), callback_data="publish_country_field:emoji", style="primary"),
+                ],
+                back_callback="publish_countries_menu",
+                back_text=self._tr(user_id, "رجوع", "Back"),
+            )
+            self.edit_text(chat_id, message_id, self._tr(user_id, "اختر نوع التعديل.", "Choose edit field."), kb)
+            return
+
+        if data.startswith("publish_country_field:"):
+            field = data.split(":", 1)[1].strip().lower()
+            st = self.get_state(user_id) or {}
+            if st.get("mode") != "wait_publish_country_edit_field":
+                return
+            payload = st.get("data") or {}
+            payload["field"] = field
+            self.set_state(user_id, "wait_publish_country_edit_value", payload)
+            self.send_text(chat_id, self._tr(user_id, "ارسل القيمة الجديدة (للاسم: name_ar,name_en | للايموجي: emoji,emoji_id).", "Send new value (for name: name_ar,name_en | for emoji: emoji,emoji_id)."))
+            return
+
         if data in {"var_reload", "var_restart"}:
             self.mark_runtime_change()
             self.answer_callback(callback_id, self._tr(user_id, "تم طلب إعادة تشغيل البوت.", "Bot restart requested."))
@@ -2101,8 +2626,9 @@ class PanelBot:
             return
 
         if data == "traffic_menu":
+            rev = self.bump_view_rev(user_id)
             self._show_loading(chat_id, message_id, TRAFFIC_TITLE, self._tr(user_id, "⏳ جاري تحميل المنصات...", "⏳ Loading platforms..."), "main_menu", user_id)
-            self._run_async(self._render_traffic_menu, chat_id, message_id, user_id, 1, True)
+            self._run_async(self._render_traffic_menu, chat_id, message_id, user_id, 1, True, rev)
             return
 
         if data.startswith("traffic_menu_nav:"):
@@ -2110,14 +2636,16 @@ class PanelBot:
                 page = int(data.split(":", 1)[1])
             except Exception:
                 page = 1
+            rev = self.user_view_rev.get(user_id, 0)
             self._show_loading(chat_id, message_id, TRAFFIC_TITLE, self._tr(user_id, "⏳ جاري تحميل المنصات...", "⏳ Loading platforms..."), "main_menu", user_id)
-            self._run_async(self._render_traffic_menu, chat_id, message_id, user_id, page, False)
+            self._run_async(self._render_traffic_menu, chat_id, message_id, user_id, page, False, rev)
             return
 
         if data.startswith("traffic_app:"):
             app = data.split(":", 1)[1]
+            rev = self.user_view_rev.get(user_id, 0)
             self._show_loading(chat_id, message_id, TRAFFIC_TITLE, self._tr(user_id, f"🧩 الخدمة: {app}\n⏳ جاري تحميل الترافيك...", f"🧩 Service: {app}\n⏳ Loading traffic..."), "traffic_menu", user_id)
-            self._run_async(self.show_traffic_for_app, chat_id, message_id, user_id, app, 1, True)
+            self._run_async(self.show_traffic_for_app, chat_id, message_id, user_id, app, 1, True, rev)
             return
 
         if data.startswith("traffic_nav:"):
@@ -2129,13 +2657,15 @@ class PanelBot:
                 page = int(parts[2])
             except Exception:
                 page = 1
+            rev = self.user_view_rev.get(user_id, 0)
             self._show_loading(chat_id, message_id, TRAFFIC_TITLE, self._tr(user_id, f"🧩 الخدمة: {app}\n⏳ جاري تحميل الصفحة...", f"🧩 Service: {app}\n⏳ Loading page..."), "traffic_menu", user_id)
-            self._run_async(self.show_traffic_for_app, chat_id, message_id, user_id, app, page, False)
+            self._run_async(self.show_traffic_for_app, chat_id, message_id, user_id, app, page, False, rev)
             return
 
         if data == "show_platforms":
+            rev = self.bump_view_rev(user_id)
             self._show_loading(chat_id, message_id, TRAFFIC_TITLE, self._tr(user_id, "⏳ جاري تحميل المنصات...", "⏳ Loading platforms..."), "main_menu", user_id)
-            self._run_async(self.show_platforms, chat_id, user_id, message_id, True, 1, True)
+            self._run_async(self.show_platforms, chat_id, user_id, message_id, True, 1, True, rev)
             return
 
         if data.startswith("platforms_nav:"):
@@ -2143,11 +2673,13 @@ class PanelBot:
                 page = int(data.split(":", 1)[1])
             except Exception:
                 page = 1
+            rev = self.user_view_rev.get(user_id, 0)
             self._show_loading(chat_id, message_id, TRAFFIC_TITLE, self._tr(user_id, "⏳ جاري تحميل المنصات...", "⏳ Loading platforms..."), "main_menu", user_id)
-            self._run_async(self.show_platforms, chat_id, user_id, message_id, True, page, False)
+            self._run_async(self.show_platforms, chat_id, user_id, message_id, True, page, False, rev)
             return
 
         if data == "numbers_menu":
+            self.bump_view_rev(user_id)
             self.edit_text(
                 chat_id,
                 message_id,
@@ -2163,8 +2695,9 @@ class PanelBot:
 
         if data == "numbers_show_all":
             self.user_numbers_view_account[user_id] = None
+            rev = self.bump_view_rev(user_id)
             self._show_loading(chat_id, message_id, NUMBERS_TITLE, self._tr(user_id, "⏳ جاري تحميل الأرقام...", "⏳ Loading numbers..."), "numbers_menu", user_id)
-            self._run_async(self.show_numbers, chat_id, message_id, user_id, 1, True, None)
+            self._run_async(self.show_numbers, chat_id, message_id, user_id, 1, True, None, rev)
             return
 
         if data == "numbers_show_custom":
@@ -2182,8 +2715,9 @@ class PanelBot:
                 self.answer_callback(callback_id, self._tr(user_id, "اختيار حساب غير صالح.", "Invalid account selection."))
                 return
             self.user_numbers_view_account[user_id] = account_name
+            rev = self.bump_view_rev(user_id)
             self._show_loading(chat_id, message_id, NUMBERS_TITLE, self._tr(user_id, "⏳ جاري تحميل الأرقام...", "⏳ Loading numbers..."), "numbers_show", user_id)
-            self._run_async(self.show_numbers, chat_id, message_id, user_id, 1, True, account_name)
+            self._run_async(self.show_numbers, chat_id, message_id, user_id, 1, True, account_name, rev)
             return
 
         if data.startswith("numbers_nav:"):
@@ -2191,9 +2725,10 @@ class PanelBot:
                 page = int(data.split(":", 1)[1])
             except Exception:
                 page = 1
+            rev = self.user_view_rev.get(user_id, 0)
             self._show_loading(chat_id, message_id, NUMBERS_TITLE, self._tr(user_id, "⏳ جاري تحميل الصفحة...", "⏳ Loading page..."), "numbers_menu", user_id)
             account_name = self.user_numbers_view_account.get(user_id)
-            self._run_async(self.show_numbers, chat_id, message_id, user_id, page, False, account_name)
+            self._run_async(self.show_numbers, chat_id, message_id, user_id, page, False, account_name, rev)
             return
 
         if data == "numbers_export_menu":
@@ -2301,8 +2836,94 @@ class PanelBot:
             self.edit_text(
                 chat_id,
                 message_id,
+                self._title_numbers(user_id) + "\n" + self._tr(user_id, "اختر نوع التحكم قبل اختيار الحساب.", "Choose request mode before selecting accounts."),
+                self.kb_numbers_request_mode(user_id),
+            )
+            return
+
+        if data == "numbers_req_mode_normal":
+            self.edit_text(
+                chat_id,
+                message_id,
                 self._title_numbers(user_id) + "\n" + self._tr(user_id, "اختر الحساب لتنفيذ طلب الأرقام.", "Choose account to request numbers."),
-                self.kb_account_picker(user_id, "numbers_req_acc", back_callback="numbers_menu"),
+                self.kb_account_picker(user_id, "numbers_req_acc", back_callback="numbers_request"),
+            )
+            return
+
+        if data == "numbers_req_mode_multi":
+            self.set_state(user_id, "wait_req_multi_accounts", {"selected": []})
+            self.edit_text(
+                chat_id,
+                message_id,
+                self._title_numbers(user_id)
+                + "\n"
+                + self._tr(
+                    user_id,
+                    "اختر الحسابات ثم اضغط تم.\nكل حساب يضيف 1000 حد للرينج.",
+                    "Choose accounts then press Done.\nEach account adds 1000 range limit.",
+                ),
+                self.kb_numbers_req_multi_accounts(user_id, set()),
+            )
+            return
+
+        if data.startswith("numbers_req_multi_toggle:"):
+            st = self.get_state(user_id) or {}
+            if st.get("mode") != "wait_req_multi_accounts":
+                self.send_text(chat_id, self._tr(user_id, "ابدأ من طلب الأرقام أولًا.", "Start from request numbers first."))
+                return
+            payload = st.get("data") or {}
+            selected = set(str(x) for x in (payload.get("selected") or []))
+            account_name = self._account_name_by_pick(data.split(":", 1)[1])
+            if not account_name:
+                return
+            if account_name in selected:
+                selected.remove(account_name)
+            else:
+                selected.add(account_name)
+            payload["selected"] = sorted(selected)
+            self.set_state(user_id, "wait_req_multi_accounts", payload)
+            self.edit_text(
+                chat_id,
+                message_id,
+                self._title_numbers(user_id)
+                + "\n"
+                + self._tr(
+                    user_id,
+                    f"الحسابات المختارة: {len(selected)}",
+                    f"Selected accounts: {len(selected)}",
+                ),
+                self.kb_numbers_req_multi_accounts(user_id, selected),
+            )
+            return
+
+        if data == "numbers_req_multi_done":
+            st = self.get_state(user_id) or {}
+            if st.get("mode") != "wait_req_multi_accounts":
+                self.send_text(chat_id, self._tr(user_id, "ابدأ من طلب الأرقام أولًا.", "Start from request numbers first."))
+                return
+            payload = st.get("data") or {}
+            selected = [str(x) for x in (payload.get("selected") or []) if str(x).strip()]
+            if not selected:
+                self.send_text(chat_id, self._tr(user_id, "اختر حساب واحد على الأقل.", "Select at least one account."))
+                return
+            store = self.load_ranges_store()
+            hint_rows: list[str] = []
+            ranges = store.get("ranges") if isinstance(store.get("ranges"), dict) else {}
+            for rname, entry in list(ranges.items())[:10]:
+                if not isinstance(entry, dict):
+                    continue
+                rem = self._range_remaining(str(rname), account_names=selected)
+                hint_rows.append(self._tr(user_id, f"- {rname} | المتبقي: {rem}", f"- {rname} | remaining: {rem}"))
+            hint = "\n".join(hint_rows) if hint_rows else self._tr(user_id, "لا توجد رينجات محفوظة بعد.", "No saved ranges yet.")
+            self.set_state(user_id, "wait_range_name", {"accounts": selected, "mode": "multi"})
+            self.send_text(
+                chat_id,
+                self._tr(
+                    user_id,
+                    f"تم اختيار {len(selected)} حساب.\nاكتب اسم الرينج للطلب:\n\n",
+                    f"Selected {len(selected)} accounts.\nType range name to request:\n\n",
+                )
+                + hint,
             )
             return
 
@@ -2320,7 +2941,7 @@ class PanelBot:
                 rem = self._range_remaining(str(rname), account_name)
                 hint_rows.append(self._tr(user_id, f"- {rname} | المتبقي: {rem}", f"- {rname} | remaining: {rem}"))
             hint = "\n".join(hint_rows) if hint_rows else self._tr(user_id, "لا توجد رينجات محفوظة بعد.", "No saved ranges yet.")
-            self.set_state(user_id, "wait_range_name", {"account": account_name})
+            self.set_state(user_id, "wait_range_name", {"account": account_name, "mode": "normal"})
             self.send_text(
                 chat_id,
                 self._tr(user_id, f"الحساب المختار: {account_name}\nاكتب اسم الرينج للطلب:\n\n", f"Selected account: {account_name}\nType range name to request:\n\n")
@@ -2334,11 +2955,13 @@ class PanelBot:
             return
 
         if data == "balances":
+            rev = self.bump_view_rev(user_id)
             self._show_loading(chat_id, message_id, self._tr(user_id, "༺═════⇓ رصيدي ⇓═════༻", "༺═════⇓ Balances ⇓═════༻"), self._tr(user_id, "⏳ جاري تحميل الرصيد...", "⏳ Loading balances..."), "main_menu", user_id)
-            self._run_async(self.show_balances, chat_id, message_id, user_id)
+            self._run_async(self.show_balances, chat_id, message_id, user_id, rev)
             return
 
         if data == "stats":
+            rev = self.bump_view_rev(user_id)
             self._show_loading(
                 chat_id,
                 message_id,
@@ -2347,7 +2970,7 @@ class PanelBot:
                 "main_menu",
                 user_id,
             )
-            self._run_async(self.show_stats, chat_id, message_id, user_id)
+            self._run_async(self.show_stats, chat_id, message_id, user_id, rev)
             return
 
         if data == "groups_menu":
@@ -2617,6 +3240,111 @@ class PanelBot:
             )
             return
 
+        if mode == "wait_new_bot_token":
+            if not self.is_primary_admin(user_id):
+                self.clear_state(user_id)
+                self.send_text(chat_id, self._tr(user_id, "غير متاح.", "Not allowed."))
+                return
+            token = str(text or "").strip()
+            if ":" not in token or len(token) < 20:
+                self.send_text(chat_id, self._tr(user_id, "توكن غير صالح.", "Invalid token."))
+                return
+            self.set_state(user_id, "wait_new_bot_storage", {"token": token})
+            kb = self._pattern_rows(
+                [
+                    self._btn(self._tr(user_id, "🗂️ تخزين خاص", "🗂️ Private Storage"), callback_data="var_bot_store:private", style="primary"),
+                    self._btn(self._tr(user_id, "🔗 تخزين مشترك مع البوت الأساسي", "🔗 Shared With Main Bot"), callback_data="var_bot_store:shared", style="success"),
+                ],
+                back_callback="var_bots_menu",
+                back_text=self._tr(user_id, "رجوع", "Back"),
+            )
+            self.send_text(chat_id, self._tr(user_id, "اختر نوع التخزين.", "Choose storage mode."), kb)
+            return
+
+        if mode == "wait_publish_service_add":
+            parts = [x.strip() for x in text.split(",")]
+            if len(parts) < 2:
+                self.send_text(chat_id, self._tr(user_id, "صيغة غير صحيحة.", "Invalid format."))
+                return
+            key = parts[0]
+            short = parts[1]
+            emoji = parts[2] if len(parts) > 2 else ""
+            emoji_id = parts[3] if len(parts) > 3 else ""
+            rows = self.load_services()
+            rows = [r for r in rows if str(r.get("key", "")).strip().lower() != key.lower()]
+            rows.append({"key": key, "short": short, "emoji": emoji, "emoji_id": emoji_id})
+            self.save_services(rows)
+            self.clear_state(user_id)
+            self.send_text(chat_id, self._tr(user_id, "تمت إضافة الخدمة.", "Service added."), self.kb_publish_services_menu(user_id))
+            return
+
+        if mode == "wait_publish_country_add":
+            parts = [x.strip() for x in text.split(",")]
+            if len(parts) < 4:
+                self.send_text(chat_id, self._tr(user_id, "صيغة غير صحيحة.", "Invalid format."))
+                return
+            dial = "".join(ch for ch in parts[0] if ch.isdigit())
+            iso2 = parts[1].upper()
+            name_ar = parts[2]
+            name_en = parts[3]
+            emoji = parts[4] if len(parts) > 4 else ""
+            emoji_id = parts[5] if len(parts) > 5 else ""
+            rows = self.load_countries_store()
+            rows = [r for r in rows if str(r.get("dial_code", "")).strip() != dial]
+            rows.append({"dial_code": dial, "iso2": iso2, "name_ar": name_ar, "name_en": name_en, "emoji": emoji, "emoji_id": emoji_id})
+            self.save_countries_store(rows)
+            self.clear_state(user_id)
+            self.send_text(chat_id, self._tr(user_id, "تمت إضافة البلد.", "Country added."), self.kb_publish_countries_menu(user_id))
+            return
+
+        if mode == "wait_publish_service_edit_value":
+            idx = int(data.get("index", -1))
+            field = str(data.get("field", "")).strip().lower()
+            rows = self.load_services()
+            if idx < 0 or idx >= len(rows):
+                self.clear_state(user_id)
+                self.send_text(chat_id, self._tr(user_id, "العنصر غير موجود.", "Item no longer exists."))
+                return
+            if field == "key":
+                rows[idx]["key"] = text.strip()
+            elif field == "emoji":
+                parts = [x.strip() for x in text.split(",", 1)]
+                rows[idx]["emoji"] = parts[0] if parts else ""
+                rows[idx]["emoji_id"] = parts[1] if len(parts) > 1 else ""
+            else:
+                self.send_text(chat_id, self._tr(user_id, "نوع تعديل غير صالح.", "Invalid edit field."))
+                return
+            self.save_services(rows)
+            self.clear_state(user_id)
+            self.send_text(chat_id, self._tr(user_id, "تم تعديل الخدمة.", "Service updated."), self.kb_publish_services_menu(user_id))
+            return
+
+        if mode == "wait_publish_country_edit_value":
+            idx = int(data.get("index", -1))
+            field = str(data.get("field", "")).strip().lower()
+            rows = self.load_countries_store()
+            if idx < 0 or idx >= len(rows):
+                self.clear_state(user_id)
+                self.send_text(chat_id, self._tr(user_id, "العنصر غير موجود.", "Item no longer exists."))
+                return
+            if field == "name":
+                parts = [x.strip() for x in text.split(",", 1)]
+                rows[idx]["name_ar"] = parts[0] if parts else rows[idx].get("name_ar", "")
+                rows[idx]["name_en"] = parts[1] if len(parts) > 1 else rows[idx].get("name_en", "")
+            elif field == "iso2":
+                rows[idx]["iso2"] = text.strip().upper()
+            elif field == "emoji":
+                parts = [x.strip() for x in text.split(",", 1)]
+                rows[idx]["emoji"] = parts[0] if parts else ""
+                rows[idx]["emoji_id"] = parts[1] if len(parts) > 1 else ""
+            else:
+                self.send_text(chat_id, self._tr(user_id, "نوع تعديل غير صالح.", "Invalid edit field."))
+                return
+            self.save_countries_store(rows)
+            self.clear_state(user_id)
+            self.send_text(chat_id, self._tr(user_id, "تم تعديل البلد.", "Country updated."), self.kb_publish_countries_menu(user_id))
+            return
+
         if mode == "wait_add_account":
             parts = [x.strip() for x in text.split(",")]
             if len(parts) < 3:
@@ -2697,14 +3425,20 @@ class PanelBot:
         if mode == "wait_range_name":
             range_name = text
             account_name = str(data.get("account") or "").strip()
-            remain = self._range_remaining(range_name, account_name or None)
-            self.set_state(user_id, "wait_range_count", {"range": range_name, "remaining": remain, "account": account_name})
+            account_names = [str(x) for x in (data.get("accounts") or []) if str(x).strip()]
+            remain = self._range_remaining(range_name, account_name or None, account_names or None)
+            self.set_state(
+                user_id,
+                "wait_range_count",
+                {"range": range_name, "remaining": remain, "account": account_name, "accounts": account_names, "mode": data.get("mode")},
+            )
+            selected_text = account_name if account_name else ", ".join(account_names)
             self.send_text(
                 chat_id,
                 self._tr(
                     user_id,
-                    f"الحساب: {account_name}\nاكتب العدد المطلوب (مضاعف 50).\nالمتبقي للرينج {range_name}: {remain}",
-                    f"Account: {account_name}\nType requested count (multiple of 50).\nRemaining for range {range_name}: {remain}",
+                    f"الحسابات: {selected_text}\nاكتب العدد المطلوب (مضاعف 50).\nالمتبقي للرينج {range_name}: {remain}",
+                    f"Accounts: {selected_text}\nType requested count (multiple of 50).\nRemaining for range {range_name}: {remain}",
                 ),
             )
             return
@@ -2712,13 +3446,14 @@ class PanelBot:
         if mode == "wait_range_count":
             range_name = str(data.get("range") or "")
             account_name = str(data.get("account") or "").strip()
+            account_names = [str(x) for x in (data.get("accounts") or []) if str(x).strip()]
             if not text.isdigit():
                 self.send_text(chat_id, self._tr(user_id, "العدد لازم يكون رقم صحيح.", "Count must be a valid integer."))
                 return
             count = int(text)
             self.clear_state(user_id)
             self.send_text(chat_id, self._tr(user_id, "جاري تنفيذ طلب الأرقام...", "Processing number request..."))
-            self._run_async(self._process_range_request, chat_id, user_id, range_name, count, account_name or None)
+            self._run_async(self._process_range_request, chat_id, user_id, range_name, count, account_name or None, account_names or None)
             return
 
         if mode == "wait_delete_numbers":

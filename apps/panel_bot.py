@@ -545,6 +545,34 @@ class PanelBot:
         self.save_managed_bots(rows)
         return True
 
+    def remove_managed_bot_admin(self, bot_id: str, admin_id: int) -> bool:
+        bid = str(bot_id or "").strip()
+        aid = int(admin_id or 0)
+        if not bid or aid <= 0:
+            return False
+        rows = self.load_managed_bots()
+        changed = False
+        for row in rows:
+            if str(row.get("id", "")).strip() != bid:
+                continue
+            ids = row.get("admin_ids")
+            if not isinstance(ids, list):
+                ids = []
+            cleaned: list[int] = []
+            for x in ids:
+                s = str(x).strip()
+                if s.isdigit():
+                    cleaned.append(int(s))
+            new_ids = [x for x in cleaned if x != aid]
+            if len(new_ids) != len(cleaned):
+                row["admin_ids"] = new_ids
+                changed = True
+            break
+        if not changed:
+            return False
+        self.save_managed_bots(rows)
+        return True
+
     def request_messages_refresh(self) -> None:
         cfg = self.load_json(RUNTIME_CONFIG_FILE, {})
         if not isinstance(cfg, dict):
@@ -1096,7 +1124,7 @@ class PanelBot:
             idx += take
             step += 1
         if back_callback:
-            rows.append([self._btn(back_text, callback_data=back_callback, style="primary")])
+            rows.append([self._btn(back_text, callback_data=back_callback, style="secondary")])
         return rows
 
     def _q(self, title: str) -> str:
@@ -1108,7 +1136,7 @@ class PanelBot:
             chat_id,
             message_id,
             self._q(title) + f"\n{message}",
-            [[self._btn(back_label, callback_data=back_callback, style="primary")]],
+            [[self._btn(back_label, callback_data=back_callback, style="secondary")]],
         )
 
     def _run_async(self, fn, *args, **kwargs) -> None:
@@ -1372,12 +1400,19 @@ class PanelBot:
     def kb_bots_mgmt_menu(self, user_id: int) -> list[list[dict[str, Any]]]:
         buttons = [
             self._btn(self._tr(user_id, "➕ إضافة بوت", "➕ Add Bot"), callback_data="var_bot_add", style="success"),
-            self._btn(self._tr(user_id, "👮 إضافة أدمن للبوت", "👮 Add Bot Admin"), callback_data="var_bot_admin_add_menu", style="primary"),
+            self._btn(self._tr(user_id, "👮 إدارة أدمن البوتات", "👮 Bots Admin Management"), callback_data="var_bot_admins_menu", style="primary"),
             self._btn(self._tr(user_id, "📏 إدارة الحدود", "📏 Limits Management"), callback_data="var_bot_limits_menu", style="primary"),
             self._btn(self._tr(user_id, "🗑️ حذف بوت", "🗑️ Delete Bot"), callback_data="var_bot_delete_menu", style="danger"),
             self._btn(self._tr(user_id, "📄 عرض البوتات", "📄 Show Bots"), callback_data="var_bot_list", style="primary"),
         ]
         return self._pattern_rows(buttons, back_callback="vars_menu", back_text=self._tr(user_id, "رجوع", "Back"))
+
+    def kb_bot_admins_menu(self, user_id: int) -> list[list[dict[str, Any]]]:
+        buttons = [
+            self._btn(self._tr(user_id, "➕ إضافة أدمن", "➕ Add Admin"), callback_data="var_bot_admin_add_menu", style="success"),
+            self._btn(self._tr(user_id, "🗑️ حذف أدمن", "🗑️ Delete Admin"), callback_data="var_bot_admin_delete_bot_menu", style="danger"),
+        ]
+        return self._pattern_rows(buttons, back_callback="var_bots_menu", back_text=self._tr(user_id, "رجوع", "Back"))
 
     def kb_bot_limits_menu(self, user_id: int) -> list[list[dict[str, Any]]]:
         buttons = [
@@ -2710,6 +2745,20 @@ class PanelBot:
             )
             return
 
+        if data == "var_bot_admins_menu":
+            if not self.has_full_vars_access(user_id):
+                self.answer_callback(callback_id, self._tr(user_id, "غير متاح.", "Not allowed."))
+                return
+            self.edit_text(
+                chat_id,
+                message_id,
+                self._q(self._tr(user_id, "༺═════⇓ إدارة أدمن البوتات ⇓═════༻", "༺═════⇓ Bots Admin Management ⇓═════༻"))
+                + "\n"
+                + self._tr(user_id, "اختر العملية.", "Choose an action."),
+                self.kb_bot_admins_menu(user_id),
+            )
+            return
+
         if data == "var_bot_add":
             if not self.has_full_vars_access(user_id):
                 self.answer_callback(callback_id, self._tr(user_id, "غير متاح.", "Not allowed."))
@@ -2730,13 +2779,107 @@ class PanelBot:
                     continue
                 bname = str(row.get("bot_name") or row.get("bot_username") or f"bot_{i}").strip()
                 buttons.append(self._btn(f"🤖 {bname}", callback_data=f"var_bot_admin_pick:{bid}", style="primary"))
-            kb = self._pattern_rows(buttons, back_callback="var_bots_menu", back_text=self._tr(user_id, "رجوع", "Back"))
+            kb = self._pattern_rows(buttons, back_callback="var_bot_admins_menu", back_text=self._tr(user_id, "رجوع", "Back"))
             self.edit_text(
                 chat_id,
                 message_id,
                 self._tr(user_id, "اختر البوت لإضافة أدمن.", "Choose bot to add admin."),
                 kb,
             )
+            return
+
+        if data == "var_bot_admin_delete_bot_menu":
+            if not self.has_full_vars_access(user_id):
+                self.answer_callback(callback_id, self._tr(user_id, "غير متاح.", "Not allowed."))
+                return
+            rows = self.load_managed_bots()
+            buttons: list[dict[str, Any]] = []
+            for i, row in enumerate(rows, start=1):
+                bid = str(row.get("id", "")).strip()
+                if not bid:
+                    continue
+                bname = str(row.get("bot_name") or row.get("bot_username") or f"bot_{i}").strip()
+                buttons.append(self._btn(f"🤖 {bname}", callback_data=f"var_bot_admin_del_pickbot:{bid}", style="primary"))
+            kb = self._pattern_rows(buttons, back_callback="var_bot_admins_menu", back_text=self._tr(user_id, "رجوع", "Back"))
+            self.edit_text(chat_id, message_id, self._tr(user_id, "اختر البوت.", "Choose bot."), kb)
+            return
+
+        if data.startswith("var_bot_admin_del_pickbot:"):
+            if not self.has_full_vars_access(user_id):
+                self.answer_callback(callback_id, self._tr(user_id, "غير متاح.", "Not allowed."))
+                return
+            bot_id = data.split(":", 1)[1].strip()
+            rows = self.load_managed_bots()
+            target = None
+            for row in rows:
+                if str(row.get("id", "")).strip() == bot_id:
+                    target = row
+                    break
+            if not target:
+                self.answer_callback(callback_id, self._tr(user_id, "البوت غير موجود.", "Bot not found."))
+                return
+            bot_name = str(target.get("bot_name") or target.get("bot_username") or "bot").strip()
+            admin_ids = [
+                int(str(x).strip())
+                for x in (target.get("admin_ids") or [])
+                if str(x).strip().isdigit()
+            ]
+            buttons: list[dict[str, Any]] = []
+            for aid in admin_ids:
+                buttons.append(self._btn(f"🗑️ {aid}", callback_data=f"var_bot_admin_del:{bot_id}:{aid}", style="danger"))
+            kb = self._pattern_rows(buttons, back_callback="var_bot_admin_delete_bot_menu", back_text=self._tr(user_id, "رجوع", "Back"))
+            text = self._q(self._tr(user_id, "༺═════⇓ حذف أدمن البوت ⇓═════༻", "༺═════⇓ Delete Bot Admin ⇓═════༻")) + "\n"
+            if admin_ids:
+                text += self._tr(user_id, f"اختر الأدمن لحذفه من {bot_name}.", f"Choose admin to delete from {bot_name}.")
+            else:
+                text += self._tr(user_id, f"لا يوجد أدمنات إضافية في {bot_name}.", f"No extra admins in {bot_name}.")
+            self.edit_text(chat_id, message_id, text, kb)
+            return
+
+        if data.startswith("var_bot_admin_del:"):
+            if not self.has_full_vars_access(user_id):
+                self.answer_callback(callback_id, self._tr(user_id, "غير متاح.", "Not allowed."))
+                return
+            parts = data.split(":")
+            if len(parts) != 3:
+                self.answer_callback(callback_id, self._tr(user_id, "طلب غير صالح.", "Invalid request."))
+                return
+            bot_id = parts[1].strip()
+            aid = parts[2].strip()
+            if not aid.isdigit():
+                self.answer_callback(callback_id, self._tr(user_id, "ID غير صالح.", "Invalid ID."))
+                return
+            if self.remove_managed_bot_admin(bot_id, int(aid)):
+                self.mark_runtime_change()
+                self.answer_callback(callback_id, self._tr(user_id, "تم حذف الأدمن.", "Admin deleted."))
+            else:
+                self.answer_callback(callback_id, self._tr(user_id, "لم يتم حذف الأدمن.", "Admin was not deleted."))
+            # Re-render same bot admins list after deletion.
+            rows = self.load_managed_bots()
+            target = None
+            for row in rows:
+                if str(row.get("id", "")).strip() == bot_id:
+                    target = row
+                    break
+            if not target:
+                self.edit_text(chat_id, message_id, self._tr(user_id, "البوت غير موجود.", "Bot not found."), self.kb_bot_admins_menu(user_id))
+                return
+            bot_name = str(target.get("bot_name") or target.get("bot_username") or "bot").strip()
+            admin_ids = [
+                int(str(x).strip())
+                for x in (target.get("admin_ids") or [])
+                if str(x).strip().isdigit()
+            ]
+            buttons: list[dict[str, Any]] = []
+            for aid2 in admin_ids:
+                buttons.append(self._btn(f"🗑️ {aid2}", callback_data=f"var_bot_admin_del:{bot_id}:{aid2}", style="danger"))
+            kb = self._pattern_rows(buttons, back_callback="var_bot_admin_delete_bot_menu", back_text=self._tr(user_id, "رجوع", "Back"))
+            text = self._q(self._tr(user_id, "༺═════⇓ حذف أدمن البوت ⇓═════༻", "༺═════⇓ Delete Bot Admin ⇓═════༻")) + "\n"
+            if admin_ids:
+                text += self._tr(user_id, f"اختر الأدمن لحذفه من {bot_name}.", f"Choose admin to delete from {bot_name}.")
+            else:
+                text += self._tr(user_id, f"لا يوجد أدمنات إضافية في {bot_name}.", f"No extra admins in {bot_name}.")
+            self.edit_text(chat_id, message_id, text, kb)
             return
 
         if data.startswith("var_bot_admin_pick:"):

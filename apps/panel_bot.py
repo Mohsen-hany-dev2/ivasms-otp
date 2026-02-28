@@ -17,6 +17,7 @@ from app.paths import (
     COUNTRY_FILE,
     EXPORT_DIR,
     GROUPS_FILE,
+    NAMESPACE,
     PLATFORMS_FILE,
     RANGES_STORE_FILE,
     RUNTIME_CONFIG_FILE,
@@ -97,6 +98,13 @@ class PanelBot:
     def is_primary_admin(self, user_id: int) -> bool:
         # Main owner/admin account only.
         return int(user_id or 0) == int(PRIMARY_ADMIN_ID)
+
+    def is_main_instance(self) -> bool:
+        return str(NAMESPACE).strip().lower() == "main"
+
+    def has_full_vars_access(self, user_id: int) -> bool:
+        # Full variables are only for the primary admin on the main bot instance.
+        return self.is_main_instance() and self.is_primary_admin(user_id)
 
     def bump_view_rev(self, user_id: int) -> int:
         uid = int(user_id)
@@ -1137,10 +1145,9 @@ class PanelBot:
         return self._pattern_rows(buttons, back_callback="main_menu", back_text=self._tr(user_id, "رجوع", "Back"))
 
     def kb_vars_menu(self, user_id: int) -> list[list[dict[str, Any]]]:
-        if not self.is_primary_admin(user_id):
+        if not self.has_full_vars_access(user_id):
             buttons = [
                 self._btn(self._tr(user_id, "🗓️ Start Date", "🗓️ Start Date"), callback_data="var_startdate_menu", style="primary"),
-                self._btn(self._tr(user_id, "👮 إدارة الأدمن", "👮 Admin Management"), callback_data="var_admins_menu", style="primary"),
                 self._btn(self._tr(user_id, "🌐 تعيين API URL", "🌐 Set API URL"), callback_data="var_set_api_url", style="primary"),
             ]
             return self._pattern_rows(buttons, back_callback="main_menu", back_text=self._tr(user_id, "رجوع", "Back"))
@@ -2113,22 +2120,22 @@ class PanelBot:
         api_url = self.get_runtime_api_base()
         start_date = self.get_runtime_start_date()
         start_date_auto = self.is_start_date_auto_today_enabled()
-        limit = self.get_runtime_bot_limit()
-        admins = ", ".join(str(x) for x in self.get_runtime_admin_ids())
-        text = "\n".join(
-            [
-                self._q(self._tr(user_id, "༺═════⇓ المتغيرات ⇓═════༻", "༺═════⇓ Variables ⇓═════༻")),
-                self._tr(user_id, f"🌐 API URL: {api_url or '-'}", f"🌐 API URL: {api_url or '-'}"),
-                self._tr(user_id, f"🗓️ Start Date: {start_date}", f"🗓️ Start Date: {start_date}"),
-                self._tr(
-                    user_id,
-                    f"⏱️ التوقيت التلقائي: {'مفعل 🟢' if start_date_auto else 'مغلق 🔴'}",
-                    f"⏱️ Auto Daily Time: {'ON 🟢' if start_date_auto else 'OFF 🔴'}",
-                ),
-                self._tr(user_id, f"📦 BOT LIMIT: {limit}", f"📦 BOT LIMIT: {limit}"),
-                self._tr(user_id, f"👮 Admin IDs: {admins}", f"👮 Admin IDs: {admins}"),
-            ]
-        )
+        lines = [
+            self._q(self._tr(user_id, "༺═════⇓ المتغيرات ⇓═════༻", "༺═════⇓ Variables ⇓═════༻")),
+            self._tr(user_id, f"🌐 API URL: {api_url or '-'}", f"🌐 API URL: {api_url or '-'}"),
+            self._tr(user_id, f"🗓️ Start Date: {start_date}", f"🗓️ Start Date: {start_date}"),
+            self._tr(
+                user_id,
+                f"⏱️ التوقيت التلقائي: {'مفعل 🟢' if start_date_auto else 'مغلق 🔴'}",
+                f"⏱️ Auto Daily Time: {'ON 🟢' if start_date_auto else 'OFF 🔴'}",
+            ),
+        ]
+        if self.has_full_vars_access(user_id):
+            limit = self.get_runtime_bot_limit()
+            admins = ", ".join(str(x) for x in self.get_runtime_admin_ids())
+            lines.append(self._tr(user_id, f"📦 BOT LIMIT: {limit}", f"📦 BOT LIMIT: {limit}"))
+            lines.append(self._tr(user_id, f"👮 Admin IDs: {admins}", f"👮 Admin IDs: {admins}"))
+        text = "\n".join(lines)
         self.edit_text(chat_id, message_id, text, self.kb_vars_menu(user_id))
 
     def show_accounts(self, chat_id: int | str, message_id: int, user_id: int) -> None:
@@ -2357,6 +2364,9 @@ class PanelBot:
             return
 
         if data == "var_admins_menu":
+            if not self.has_full_vars_access(user_id):
+                self.answer_callback(callback_id, self._tr(user_id, "غير متاح.", "Not allowed."))
+                return
             self.edit_text(
                 chat_id,
                 message_id,
@@ -2381,6 +2391,9 @@ class PanelBot:
             return
 
         if data == "var_set_bot_limit":
+            if not self.has_full_vars_access(user_id):
+                self.answer_callback(callback_id, self._tr(user_id, "غير متاح.", "Not allowed."))
+                return
             current = self.get_runtime_bot_limit()
             self.set_state(user_id, "wait_var_bot_limit")
             self.send_text(
@@ -2394,6 +2407,9 @@ class PanelBot:
             return
 
         if data in {"var_add_admin", "var_admin_add"}:
+            if not self.has_full_vars_access(user_id):
+                self.answer_callback(callback_id, self._tr(user_id, "غير متاح.", "Not allowed."))
+                return
             self.set_state(user_id, "wait_var_add_admin")
             self.send_text(
                 chat_id,
@@ -2402,6 +2418,9 @@ class PanelBot:
             return
 
         if data == "var_admin_list":
+            if not self.has_full_vars_access(user_id):
+                self.answer_callback(callback_id, self._tr(user_id, "غير متاح.", "Not allowed."))
+                return
             admins_txt = ", ".join(str(x) for x in self.get_runtime_admin_ids()) or "-"
             self.edit_text(
                 chat_id,
@@ -2414,6 +2433,9 @@ class PanelBot:
             return
 
         if data == "var_admin_delete_menu":
+            if not self.has_full_vars_access(user_id):
+                self.answer_callback(callback_id, self._tr(user_id, "غير متاح.", "Not allowed."))
+                return
             admin_ids = self.get_runtime_admin_ids()
             buttons = [self._btn(f"🗑️ {aid}", callback_data=f"var_admin_del:{aid}", style="danger") for aid in admin_ids]
             kb = self._pattern_rows(buttons, back_callback="var_admins_menu", back_text=self._tr(user_id, "رجوع", "Back"))
@@ -2428,6 +2450,9 @@ class PanelBot:
             return
 
         if data.startswith("var_admin_del:"):
+            if not self.has_full_vars_access(user_id):
+                self.answer_callback(callback_id, self._tr(user_id, "غير متاح.", "Not allowed."))
+                return
             aid = data.split(":", 1)[1].strip()
             if not self.remove_runtime_admin(aid):
                 self.answer_callback(callback_id, self._tr(user_id, "تعذر حذف الأدمن.", "Could not delete admin."))
@@ -2447,7 +2472,7 @@ class PanelBot:
             return
 
         if data == "var_bots_menu":
-            if not self.is_primary_admin(user_id):
+            if not self.has_full_vars_access(user_id):
                 self.answer_callback(callback_id, self._tr(user_id, "غير متاح.", "Not allowed."))
                 return
             self.edit_text(
@@ -2461,7 +2486,7 @@ class PanelBot:
             return
 
         if data == "var_bot_add":
-            if not self.is_primary_admin(user_id):
+            if not self.has_full_vars_access(user_id):
                 self.answer_callback(callback_id, self._tr(user_id, "غير متاح.", "Not allowed."))
                 return
             self.set_state(user_id, "wait_new_bot_name")
@@ -2469,7 +2494,7 @@ class PanelBot:
             return
 
         if data == "var_bot_limits_menu":
-            if not self.is_primary_admin(user_id):
+            if not self.has_full_vars_access(user_id):
                 self.answer_callback(callback_id, self._tr(user_id, "غير متاح.", "Not allowed."))
                 return
             self.edit_text(
@@ -2521,7 +2546,7 @@ class PanelBot:
             return
 
         if data.startswith("var_bot_store:"):
-            if not self.is_primary_admin(user_id):
+            if not self.has_full_vars_access(user_id):
                 self.answer_callback(callback_id, self._tr(user_id, "غير متاح.", "Not allowed."))
                 return
             storage = data.split(":", 1)[1].strip().lower()
@@ -2553,7 +2578,7 @@ class PanelBot:
             return
 
         if data == "var_bot_list":
-            if not self.is_primary_admin(user_id):
+            if not self.has_full_vars_access(user_id):
                 self.answer_callback(callback_id, self._tr(user_id, "غير متاح.", "Not allowed."))
                 return
             rows = self.load_managed_bots()
@@ -2576,7 +2601,7 @@ class PanelBot:
             return
 
         if data == "var_bot_delete_menu":
-            if not self.is_primary_admin(user_id):
+            if not self.has_full_vars_access(user_id):
                 self.answer_callback(callback_id, self._tr(user_id, "غير متاح.", "Not allowed."))
                 return
             rows = self.load_managed_bots()
@@ -2594,7 +2619,7 @@ class PanelBot:
             return
 
         if data.startswith("var_bot_del:"):
-            if not self.is_primary_admin(user_id):
+            if not self.has_full_vars_access(user_id):
                 self.answer_callback(callback_id, self._tr(user_id, "غير متاح.", "Not allowed."))
                 return
             bot_id = data.split(":", 1)[1].strip()
@@ -2613,6 +2638,9 @@ class PanelBot:
             return
 
         if data == "publish_settings_menu":
+            if not self.has_full_vars_access(user_id):
+                self.answer_callback(callback_id, self._tr(user_id, "غير متاح.", "Not allowed."))
+                return
             self.edit_text(
                 chat_id,
                 message_id,
@@ -2622,6 +2650,11 @@ class PanelBot:
                 self.kb_publish_settings_menu(user_id),
             )
             return
+
+        if data.startswith("publish_"):
+            if not self.has_full_vars_access(user_id):
+                self.answer_callback(callback_id, self._tr(user_id, "غير متاح.", "Not allowed."))
+                return
 
         if data == "publish_services_menu":
             self.edit_text(chat_id, message_id, self._tr(user_id, "إعدادات الخدمات", "Services settings"), self.kb_publish_services_menu(user_id))
@@ -2773,6 +2806,9 @@ class PanelBot:
             return
 
         if data in {"var_reload", "var_restart"}:
+            if not self.has_full_vars_access(user_id):
+                self.answer_callback(callback_id, self._tr(user_id, "غير متاح.", "Not allowed."))
+                return
             self.mark_runtime_change()
             self.answer_callback(callback_id, self._tr(user_id, "تم طلب إعادة تشغيل البوت.", "Bot restart requested."))
             self.show_variables(chat_id, message_id, user_id)

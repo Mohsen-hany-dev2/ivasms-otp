@@ -880,8 +880,15 @@ class PanelBot:
         url = f"https://api.telegram.org/bot{self.bot_token}/{method}"
         try:
             r = requests.post(url, json=payload or {}, timeout=40)
-            return r.json()
+            data = r.json()
+            if isinstance(data, dict) and not data.get("ok"):
+                desc = str(data.get("description") or data.get("error") or "").strip()
+                if method != "getUpdates":
+                    print(f"tg_api error | method={method} | desc={desc}")
+            return data
         except Exception as exc:
+            if method != "getUpdates":
+                print(f"tg_api exception | method={method} | error={exc}")
             return {"ok": False, "error": str(exc)}
 
     def _md_escape(self, text: str) -> str:
@@ -1124,7 +1131,7 @@ class PanelBot:
             idx += take
             step += 1
         if back_callback:
-            rows.append([self._btn(back_text, callback_data=back_callback, style="secondary")])
+            rows.append([self._btn(back_text, callback_data=back_callback, style="primary")])
         return rows
 
     def _q(self, title: str) -> str:
@@ -1136,7 +1143,7 @@ class PanelBot:
             chat_id,
             message_id,
             self._q(title) + f"\n{message}",
-            [[self._btn(back_label, callback_data=back_callback, style="secondary")]],
+            [[self._btn(back_label, callback_data=back_callback, style="primary")]],
         )
 
     def _run_async(self, fn, *args, **kwargs) -> None:
@@ -1223,7 +1230,7 @@ class PanelBot:
             btn["copy_text"] = {"text": copy_text}
         if "url" not in btn and "callback_data" not in btn and "copy_text" not in btn:
             btn["callback_data"] = "noop"
-        if style in {"danger", "success", "primary", "secondary"}:
+        if style in {"danger", "success", "primary"}:
             btn["style"] = style
         return btn
 
@@ -1241,7 +1248,7 @@ class PanelBot:
                 # copy_text fallback safety
                 if "copy_text" in clean and not isinstance(clean.get("copy_text"), dict):
                     clean.pop("copy_text", None)
-                if "style" in clean and str(clean.get("style")) not in {"danger", "success", "primary", "secondary"}:
+                if "style" in clean and str(clean.get("style")) not in {"danger", "success", "primary"}:
                     clean.pop("style", None)
                 if "callback_data" not in clean and "url" not in clean and "copy_text" not in clean:
                     clean["callback_data"] = "noop"

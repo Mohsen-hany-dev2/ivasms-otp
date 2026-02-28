@@ -1508,6 +1508,31 @@ class PanelBot:
                 return 0
         return 0
 
+    def _parse_range_input_candidates(self, raw: str) -> list[str]:
+        text = str(raw or "")
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+        if not lines and text.strip():
+            lines = [text.strip()]
+        out: list[str] = []
+        seen: set[str] = set()
+        for line in lines:
+            part = line.lstrip("-•* ").strip()
+            part = re.sub(r"^\d+\.\s*", "", part).strip()
+            if "|" in part:
+                part = part.split("|", 1)[0].strip()
+            if ":" in part:
+                left, right = part.rsplit(":", 1)
+                if right.strip().isdigit():
+                    part = left.strip()
+            if not part:
+                continue
+            key = part.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(part)
+        return out
+
     def sync_ranges_store_from_numbers(self, rows: list[dict[str, str]]) -> None:
         grouped: dict[str, int] = defaultdict(int)
         for row in rows:
@@ -4660,7 +4685,11 @@ class PanelBot:
             return
 
         if mode == "wait_range_name":
-            range_name = text
+            candidates = self._parse_range_input_candidates(text)
+            if not candidates:
+                self.send_text(chat_id, self._tr(user_id, "اسم الرينج غير صالح، اكتب اسم رينج واحد.", "Invalid range name, send one range name."))
+                return
+            range_name = candidates[0]
             account_name = str(data.get("account") or "").strip()
             account_names = [str(x) for x in (data.get("accounts") or []) if str(x).strip()]
             snapshot = data.get("range_snapshot") if isinstance(data.get("range_snapshot"), dict) else {}
@@ -4690,8 +4719,17 @@ class PanelBot:
                 {"range": range_name, "remaining": remain, "existing": existing, "account": account_name, "accounts": account_names, "mode": data.get("mode")},
             )
             selected_text = account_name if account_name else ", ".join(account_names)
+            picked_note = ""
+            if len(candidates) > 1:
+                picked_note = self._tr(
+                    user_id,
+                    f"تم استلام أكثر من رينج، وتم اختيار أول واحد تلقائيًا: {range_name}\n",
+                    f"Multiple ranges detected, first one selected automatically: {range_name}\n",
+                )
             self.send_text(
                 chat_id,
+                picked_note
+                +
                 self._tr(
                     user_id,
                     f"الحسابات: {selected_text}\nالموجود الآن في الرينج {range_name}: {existing}\nاكتب العدد المطلوب (مضاعف 50).\nالمتبقي للرينج: {remain}",

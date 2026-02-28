@@ -1444,14 +1444,70 @@ class PanelBot:
                     continue
             by_range[rname] += 1
 
+        # Merge DB/store ranges so limits are visible even if some ranges are not
+        # returned in the latest live page immediately.
+        store = self.load_ranges_store()
+        ranges_store = store.get("ranges") if isinstance(store.get("ranges"), dict) else {}
+        for rname, entry in ranges_store.items():
+            if not isinstance(entry, dict):
+                continue
+            name = str(rname or "").strip()
+            if not name:
+                continue
+            if name in by_range:
+                continue
+            try:
+                stored_existing = int(str(entry.get("available_numbers_count", 0)).strip() or "0")
+            except Exception:
+                stored_existing = 0
+            if stored_existing > 0:
+                by_range[name] = stored_existing
+
+        selected_count = max(
+            1,
+            len([x for x in (account_names or []) if str(x).strip()]) if account_names else (1 if account_name else 1),
+        )
+        max_total = self.range_limit_total() * selected_count
         ranked = sorted(by_range.items(), key=lambda x: (-int(x[1]), str(x[0]).lower()))
         out: list[tuple[str, int, int]] = []
         for rname, existing in ranked[: max(1, int(limit or 20))]:
             if existing <= 0:
                 continue
-            rem = self._range_remaining(rname, account_name, account_names, numbers_rows=rows)
+            rem = max(0, max_total - int(existing))
             out.append((rname, existing, rem))
         return out
+
+    def _snapshot_existing_for_range(self, snapshot: dict[str, int], range_name: str) -> int:
+        target = str(range_name or "").strip().lower()
+        if not target or not isinstance(snapshot, dict):
+            return 0
+        for key, value in snapshot.items():
+            if str(key or "").strip().lower() != target:
+                continue
+            try:
+                return max(0, int(str(value).strip() or "0"))
+            except Exception:
+                return 0
+        return 0
+
+    def sync_ranges_store_from_numbers(self, rows: list[dict[str, str]]) -> None:
+        grouped: dict[str, int] = defaultdict(int)
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            rname = str(row.get("range") or "").strip()
+            if not rname:
+                continue
+            grouped[rname] += 1
+        if not grouped:
+            return
+        store = self.load_ranges_store()
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        for rname, count in grouped.items():
+            entry = self.range_entry(store, rname)
+            entry["available_numbers_count"] = int(count)
+            entry["last_numbers_sync_at"] = now
+        self.save_ranges_store(store)
 
     def kb_main(self, user_id: int) -> list[list[dict[str, Any]]]:
         enabled = self.fetch_codes_enabled()
@@ -1582,9 +1638,24 @@ class PanelBot:
             self._btn(self._tr(user_id, "📋 عرض الارقام", "📋 Show Numbers"), callback_data="numbers_show", style="primary"),
             self._btn(self._tr(user_id, "📤 تصدير الارقام", "📤 Export Numbers"), callback_data="numbers_export_menu", style="primary"),
             self._btn(self._tr(user_id, "🛒 طلب ارقام", "🛒 Request Numbers"), callback_data="numbers_request", style="success"),
+            self._btn(self._tr(user_id, "🧾 الرينجات", "🧾 Ranges"), callback_data="ranges_menu", style="primary"),
             self._btn(self._tr(user_id, "🗑️ حذف ارقام", "🗑️ Delete Numbers"), callback_data="numbers_delete", style="danger"),
         ]
         return self._pattern_rows(buttons, back_callback="main_menu")
+
+    def kb_numbers_delete_menu(self, user_id: int) -> list[list[dict[str, Any]]]:
+        buttons = [
+            self._btn(self._tr(user_id, "🗑️ حذف مخصص", "🗑️ Custom Delete"), callback_data="numbers_delete_manual", style="danger"),
+            self._btn(self._tr(user_id, "💥 حذف كل الأرقام", "💥 Delete All Numbers"), callback_data="numbers_delete_all_confirm", style="danger"),
+        ]
+        return self._pattern_rows(buttons, back_callback="numbers_menu", back_text=self._tr(user_id, "رجوع", "Back"))
+
+    def kb_ranges_menu(self, user_id: int) -> list[list[dict[str, Any]]]:
+        buttons = [
+            self._btn(self._tr(user_id, "📄 عرض الرينجات", "📄 Show Ranges"), callback_data="ranges_show", style="primary"),
+            self._btn(self._tr(user_id, "➕ إضافة رينجات", "➕ Add Ranges"), callback_data="ranges_add", style="success"),
+        ]
+        return self._pattern_rows(buttons, back_callback="numbers_menu", back_text=self._tr(user_id, "رجوع", "Back"))
 
     def kb_accounts_menu(self, user_id: int) -> list[list[dict[str, Any]]]:
         buttons = [
@@ -2611,6 +2682,25 @@ class PanelBot:
 
     def _process_delete_request(self, chat_id: int | str, user_id: int, items: list[str]) -> None:
         result = self.delete_numbers(user_id, items)
+        self.send_text(chat_id, result)
+        self.show_main(chat_id, user_id)
+
+    def _process_delete_all_numbers(self, chat_id: int | str, user_id: int) -> None:
+        rows = self.fetch_numbers()
+        ids: list[str] = []
+        for row in rows:
+            rid = str(row.get("id") or "").strip()
+            if rid:
+                ids.append(rid)
+            else:
+                num = str(row.get("number") or "").strip()
+                if num:
+                    ids.append(num)
+        if not ids:
+            self.send_text(chat_id, self._tr(user_id, "لا توجد أرقام للحذف.", "No numbers to delete."))
+            self.show_main(chat_id, user_id)
+            return
+        result = self.delete_numbers(user_id, ids)
         self.send_text(chat_id, result)
         self.show_main(chat_id, user_id)
 
@@ -3657,6 +3747,40 @@ class PanelBot:
             )
             return
 
+        if data == "ranges_menu":
+            self.edit_text(
+                chat_id,
+                message_id,
+                self._title_numbers(user_id) + "\n" + self._tr(user_id, "إدارة الرينجات.", "Ranges management."),
+                self.kb_ranges_menu(user_id),
+            )
+            return
+
+        if data == "ranges_show":
+            live_rows = self.fetch_numbers()
+            self.sync_ranges_store_from_numbers(live_rows)
+            rows = self._ranges_summary_from_live(limit=60, numbers_rows=live_rows)
+            lines = [self._q(self._tr(user_id, "༺═════⇓ الرينجات ⇓═════༻", "༺═════⇓ Ranges ⇓═════༻"))]
+            if not rows:
+                lines.append(self._tr(user_id, "لا توجد بيانات رينجات.", "No ranges data."))
+            else:
+                for rname, existing, rem in rows:
+                    lines.append(self._tr(user_id, f"{rname} | الموجود: {existing} | المتبقي: {rem}", f"{rname} | existing: {existing} | remaining: {rem}"))
+            self.edit_text(chat_id, message_id, "\n".join(lines), self.kb_ranges_menu(user_id))
+            return
+
+        if data == "ranges_add":
+            self.set_state(user_id, "wait_ranges_bulk_add")
+            self.send_text(
+                chat_id,
+                self._tr(
+                    user_id,
+                    "ارسل الرينجات، كل سطر بصيغة:\nRANGE_NAME:COUNT\nمثال:\nEGYPT 4976:1000",
+                    "Send ranges, one per line in format:\nRANGE_NAME:COUNT\nExample:\nEGYPT 4976:1000",
+                ),
+            )
+            return
+
         if data == "numbers_req_mode_normal":
             self.edit_text(
                 chat_id,
@@ -3731,11 +3855,14 @@ class PanelBot:
                 user_id,
             )
             live_rows = self.fetch_numbers()
+            self.sync_ranges_store_from_numbers(live_rows)
             hint_rows: list[str] = []
-            for rname, existing, rem in self._ranges_summary_from_live(account_names=selected, numbers_rows=live_rows, limit=20):
+            snapshot_map: dict[str, int] = {}
+            for rname, existing, rem in self._ranges_summary_from_live(account_names=selected, numbers_rows=live_rows, limit=60):
                 hint_rows.append(self._tr(user_id, f"- {rname} | الموجود: {existing} | المتبقي: {rem}", f"- {rname} | existing: {existing} | remaining: {rem}"))
+                snapshot_map[rname] = int(existing)
             hint = "\n".join(hint_rows) if hint_rows else self._tr(user_id, "لا توجد رينجات تحتوي أرقام الآن.", "No ranges with numbers right now.")
-            self.set_state(user_id, "wait_range_name", {"accounts": selected, "mode": "multi"})
+            self.set_state(user_id, "wait_range_name", {"accounts": selected, "mode": "multi", "range_snapshot": snapshot_map})
             self.send_text(
                 chat_id,
                 self._tr(
@@ -3761,11 +3888,14 @@ class PanelBot:
                 user_id,
             )
             live_rows = self.fetch_numbers()
+            self.sync_ranges_store_from_numbers(live_rows)
             hint_rows: list[str] = []
-            for rname, existing, rem in self._ranges_summary_from_live(account_name=account_name, numbers_rows=live_rows, limit=20):
+            snapshot_map: dict[str, int] = {}
+            for rname, existing, rem in self._ranges_summary_from_live(account_name=account_name, numbers_rows=live_rows, limit=60):
                 hint_rows.append(self._tr(user_id, f"- {rname} | الموجود: {existing} | المتبقي: {rem}", f"- {rname} | existing: {existing} | remaining: {rem}"))
+                snapshot_map[rname] = int(existing)
             hint = "\n".join(hint_rows) if hint_rows else self._tr(user_id, "لا توجد رينجات تحتوي أرقام الآن.", "No ranges with numbers right now.")
-            self.set_state(user_id, "wait_range_name", {"account": account_name, "mode": "normal"})
+            self.set_state(user_id, "wait_range_name", {"account": account_name, "mode": "normal", "range_snapshot": snapshot_map})
             self.send_text(
                 chat_id,
                 self._tr(user_id, f"الحساب المختار: {account_name}\nاكتب اسم الرينج للطلب:\n\n", f"Selected account: {account_name}\nType range name to request:\n\n")
@@ -3774,8 +3904,45 @@ class PanelBot:
             return
 
         if data == "numbers_delete":
+            self.edit_text(
+                chat_id,
+                message_id,
+                self._title_numbers(user_id) + "\n" + self._tr(user_id, "اختر نوع الحذف.", "Choose delete mode."),
+                self.kb_numbers_delete_menu(user_id),
+            )
+            return
+
+        if data == "numbers_delete_manual":
             self.set_state(user_id, "wait_delete_numbers")
             self.send_text(chat_id, self._tr(user_id, "اكتب IDs/أرقام (كل عنصر في سطر) أو ارسل ملف txt/csv/json.", "Type IDs/numbers (one per line) or send txt/csv/json file."))
+            return
+
+        if data == "numbers_delete_all_confirm":
+            self.edit_text(
+                chat_id,
+                message_id,
+                self._q(self._tr(user_id, "༺═════⇓ حذف الأرقام ⇓═════༻", "༺═════⇓ Delete Numbers ⇓═════༻"))
+                + "\n"
+                + self._tr(user_id, "هل تريد حذف كل الأرقام من جميع الحسابات؟", "Do you want to delete all numbers from all accounts?"),
+                [
+                    [self._btn(self._tr(user_id, "✅ نعم", "✅ Yes"), callback_data="numbers_delete_all_yes", style="danger")],
+                    [self._btn(self._tr(user_id, "❌ لا", "❌ No"), callback_data="numbers_delete_all_no", style="primary")],
+                ],
+            )
+            return
+
+        if data == "numbers_delete_all_no":
+            self.edit_text(
+                chat_id,
+                message_id,
+                self._title_numbers(user_id) + "\n" + self._tr(user_id, "اختر نوع الحذف.", "Choose delete mode."),
+                self.kb_numbers_delete_menu(user_id),
+            )
+            return
+
+        if data == "numbers_delete_all_yes":
+            self.send_text(chat_id, self._tr(user_id, "جاري حذف كل الأرقام...", "Deleting all numbers..."))
+            self._run_async(self._process_delete_all_numbers, chat_id, user_id)
             return
 
         if data == "balances":
@@ -4424,13 +4591,71 @@ class PanelBot:
             )
             return
 
+        if mode == "wait_ranges_bulk_add":
+            lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+            if not lines:
+                self.send_text(chat_id, self._tr(user_id, "لا توجد سطور صالحة.", "No valid lines found."))
+                return
+            store = self.load_ranges_store()
+            ok_count = 0
+            bad: list[str] = []
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            for line in lines:
+                if ":" not in line:
+                    bad.append(line)
+                    continue
+                left, right = line.rsplit(":", 1)
+                rname = str(left or "").strip()
+                if not rname:
+                    bad.append(line)
+                    continue
+                try:
+                    count = int(str(right).strip())
+                except Exception:
+                    bad.append(line)
+                    continue
+                if count < 0:
+                    bad.append(line)
+                    continue
+                entry = self.range_entry(store, rname)
+                entry["available_numbers_count"] = int(count)
+                entry["last_numbers_sync_at"] = now
+                ok_count += 1
+            if ok_count > 0:
+                self.save_ranges_store(store)
+            self.clear_state(user_id)
+            bad_note = ""
+            if bad:
+                bad_note = "\n" + self._tr(user_id, f"أسطر مرفوضة: {len(bad)}", f"Rejected lines: {len(bad)}")
+            self.send_text(chat_id, self._tr(user_id, f"تم حفظ الرينجات: {ok_count}", f"Ranges saved: {ok_count}") + bad_note)
+            self.show_main(chat_id, user_id)
+            return
+
         if mode == "wait_range_name":
             range_name = text
             account_name = str(data.get("account") or "").strip()
             account_names = [str(x) for x in (data.get("accounts") or []) if str(x).strip()]
-            live_rows = self.fetch_numbers()
-            existing = self._range_existing_count(range_name, account_name or None, account_names or None, numbers_rows=live_rows)
-            remain = self._range_remaining(range_name, account_name or None, account_names or None, numbers_rows=live_rows)
+            snapshot = data.get("range_snapshot") if isinstance(data.get("range_snapshot"), dict) else {}
+            existing = self._snapshot_existing_for_range(snapshot, range_name)
+            if existing <= 0:
+                # Fallback once when range not in prepared snapshot.
+                live_rows = self.fetch_numbers()
+                self.sync_ranges_store_from_numbers(live_rows)
+                existing = self._range_existing_count(range_name, account_name or None, account_names or None, numbers_rows=live_rows)
+                if existing <= 0:
+                    store = self.load_ranges_store()
+                    ranges_store = store.get("ranges") if isinstance(store.get("ranges"), dict) else {}
+                    for rname, entry in ranges_store.items():
+                        if str(rname or "").strip().lower() != str(range_name or "").strip().lower():
+                            continue
+                        if isinstance(entry, dict):
+                            try:
+                                existing = max(0, int(str(entry.get("available_numbers_count", 0)).strip() or "0"))
+                            except Exception:
+                                existing = 0
+                        break
+            selected_count = max(1, len(account_names) if account_names else (1 if account_name else 1))
+            remain = max(0, (self.range_limit_total() * selected_count) - existing)
             self.set_state(
                 user_id,
                 "wait_range_count",

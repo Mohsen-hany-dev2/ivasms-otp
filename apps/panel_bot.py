@@ -1704,25 +1704,6 @@ class PanelBot:
                     continue
             by_range[rname] += 1
 
-        # Merge DB/store ranges so limits are visible even if some ranges are not
-        # returned in the latest live page immediately.
-        store = self.load_ranges_store()
-        ranges_store = store.get("ranges") if isinstance(store.get("ranges"), dict) else {}
-        for rname, entry in ranges_store.items():
-            if not isinstance(entry, dict):
-                continue
-            name = str(rname or "").strip()
-            if not name:
-                continue
-            if name in by_range:
-                continue
-            try:
-                stored_existing = int(str(entry.get("available_numbers_count", 0)).strip() or "0")
-            except Exception:
-                stored_existing = 0
-            if stored_existing > 0:
-                by_range[name] = stored_existing
-
         selected_count = max(
             1,
             len([x for x in (account_names or []) if str(x).strip()]) if account_names else (1 if account_name else 1),
@@ -1810,10 +1791,14 @@ class PanelBot:
             if not rname:
                 continue
             grouped[rname] += 1
-        if not grouped:
-            return
         store = self.load_ranges_store()
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ranges = store.get("ranges") if isinstance(store.get("ranges"), dict) else {}
+        for rname, entry in list(ranges.items()):
+            if not isinstance(entry, dict):
+                continue
+            entry["available_numbers_count"] = 0
+            entry["last_numbers_sync_at"] = now
         for rname, count in grouped.items():
             entry = self.range_entry(store, rname)
             entry["available_numbers_count"] = int(count)
@@ -5116,25 +5101,10 @@ class PanelBot:
             range_name = candidates[0]
             account_name = str(data.get("account") or "").strip()
             account_names = [str(x) for x in (data.get("accounts") or []) if str(x).strip()]
-            snapshot = data.get("range_snapshot") if isinstance(data.get("range_snapshot"), dict) else {}
-            existing = self._snapshot_existing_for_range(snapshot, range_name)
-            if existing <= 0:
-                # Fallback once when range not in prepared snapshot.
-                live_rows = self.fetch_numbers()
-                self.sync_ranges_store_from_numbers(live_rows)
-                existing = self._range_existing_count(range_name, account_name or None, account_names or None, numbers_rows=live_rows)
-                if existing <= 0:
-                    store = self.load_ranges_store()
-                    ranges_store = store.get("ranges") if isinstance(store.get("ranges"), dict) else {}
-                    for rname, entry in ranges_store.items():
-                        if str(rname or "").strip().lower() != str(range_name or "").strip().lower():
-                            continue
-                        if isinstance(entry, dict):
-                            try:
-                                existing = max(0, int(str(entry.get("available_numbers_count", 0)).strip() or "0"))
-                            except Exception:
-                                existing = 0
-                        break
+            # Real-time synchronization: always compute from fresh live numbers.
+            live_rows = self.fetch_numbers()
+            self.sync_ranges_store_from_numbers(live_rows)
+            existing = self._range_existing_count(range_name, account_name or None, account_names or None, numbers_rows=live_rows)
             selected_count = max(1, len(account_names) if account_names else (1 if account_name else 1))
             remain = max(0, (self.range_limit_total() * selected_count) - existing)
             self.set_state(

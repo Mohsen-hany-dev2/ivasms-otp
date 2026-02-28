@@ -1357,6 +1357,7 @@ class PanelBot:
         target = str(op.get("target") or "-")
         total = max(0, int(op.get("total", 0) or 0))
         done = max(0, int(op.get("done", 0) or 0))
+        attempted = max(0, int(op.get("attempted", 0) or 0))
         remaining = max(0, total - done)
         started_at = float(op.get("started_at", 0.0) or 0.0)
         elapsed = max(0, int(time.time() - started_at)) if started_at > 0 else 0
@@ -1374,6 +1375,7 @@ class PanelBot:
             self._tr(user_id, f"العملية: {op_name}", f"Operation: {op_name}"),
             self._tr(user_id, f"هدف المهمة: {target}", f"Target: {target}"),
             self._tr(user_id, f"التقدم: {done}/{total}", f"Progress: {done}/{total}"),
+            self._tr(user_id, f"المحاولات: {attempted}/{total}", f"Attempts: {attempted}/{total}"),
             self._tr(user_id, f"المتبقي: {remaining}", f"Remaining: {remaining}"),
             self._tr(user_id, f"المدة: {mm:02d}:{ss:02d}", f"Elapsed: {mm:02d}:{ss:02d}"),
             self._tr(user_id, f"الحالة: {status_label}", f"Status: {status_label}"),
@@ -1416,6 +1418,7 @@ class PanelBot:
             "target": str(target),
             "total": max(0, int(total or 0)),
             "done": 0,
+            "attempted": 0,
             "status": "running",
             "cancelled": False,
             "note": "",
@@ -1437,6 +1440,7 @@ class PanelBot:
         op_id: str,
         *,
         done: int | None = None,
+        attempted: int | None = None,
         total: int | None = None,
         status: str | None = None,
         note: str | None = None,
@@ -1448,6 +1452,8 @@ class PanelBot:
                 return
             if done is not None:
                 op["done"] = max(0, int(done))
+            if attempted is not None:
+                op["attempted"] = max(0, int(attempted))
             if total is not None:
                 op["total"] = max(0, int(total))
             if status:
@@ -1511,6 +1517,16 @@ class PanelBot:
                 return 0
             try:
                 return max(0, int(op.get("done", 0) or 0))
+            except Exception:
+                return 0
+
+    def _get_operation_attempted(self, op_id: str) -> int:
+        with self.op_lock:
+            op = self.operations.get(op_id)
+            if not isinstance(op, dict):
+                return 0
+            try:
+                return max(0, int(op.get("attempted", 0) or 0))
             except Exception:
                 return 0
 
@@ -1811,22 +1827,29 @@ class PanelBot:
             if enabled
             else self._tr(user_id, "زر جلب الاكواد : مغلق 🔴", "Fetch Codes: OFF 🔴")
         )
-        buttons = [
-            self._btn(toggle_label, callback_data="toggle_fetch", style="success" if enabled else "danger"),
-            self._btn(self._tr(user_id, "⚙️ الإعدادات", "⚙️ Settings"), callback_data="vars_menu", style="primary"),
-            self._btn(self._tr(user_id, "💬 الرسائل", "💬 Messages"), callback_data="messages_menu", style="primary"),
-            self._btn(self._tr(user_id, "📌 عملياتي", "📌 My Operations"), callback_data="ops_menu", style="primary"),
-            self._btn(self._tr(user_id, "🌐 اللغة", "🌐 Language"), callback_data="lang_menu", style="primary"),
-            self._btn(self._tr(user_id, "📊 الترافيك", "📊 Traffic"), callback_data="traffic_menu", style="primary"),
-            self._btn(self._tr(user_id, "🧩 المنصات المتاحة", "🧩 Platforms"), callback_data="show_platforms", style="primary"),
-            self._btn(self._tr(user_id, "📱 ارقام", "📱 Numbers"), callback_data="numbers_menu", style="primary"),
-            self._btn(self._tr(user_id, "💰 رصيدي", "💰 Balances"), callback_data="balances", style="success"),
-            self._btn(self._tr(user_id, "📈 الاحصائيات", "📈 Statistics"), callback_data="stats", style="primary"),
-            self._btn(self._tr(user_id, "👥 الجروبات", "👥 Groups"), callback_data="groups_menu", style="primary"),
-            self._btn(self._tr(user_id, "👤 حساباتي", "👤 Accounts"), callback_data="accounts_menu", style="primary"),
-            self._btn(self._tr(user_id, "🆘 المساعدة", "🆘 Help"), url="https://t.me/XET_F", style="primary"),
+        return [
+            [self._btn(toggle_label, callback_data="toggle_fetch", style="success" if enabled else "danger")],
+            [
+                self._btn(self._tr(user_id, "💬 الرسائل", "💬 Messages"), callback_data="messages_menu", style="primary"),
+                self._btn(self._tr(user_id, "⚙️ الإعدادات", "⚙️ Settings"), callback_data="vars_menu", style="primary"),
+            ],
+            [
+                self._btn(self._tr(user_id, "📱 ارقام", "📱 Numbers"), callback_data="numbers_menu", style="primary"),
+                self._btn(self._tr(user_id, "🌐 اللغة", "🌐 Language"), callback_data="lang_menu", style="primary"),
+            ],
+            [
+                self._btn(self._tr(user_id, "📊 الترافيك", "📊 Traffic"), callback_data="traffic_menu", style="primary"),
+                self._btn(self._tr(user_id, "🧩 المنصات المتاحة", "🧩 Platforms"), callback_data="show_platforms", style="primary"),
+            ],
+            [self._btn(self._tr(user_id, "📌 عملياتي", "📌 My Operations"), callback_data="ops_menu", style="primary")],
+            [self._btn(self._tr(user_id, "💰 رصيدي", "💰 Balances"), callback_data="balances", style="success")],
+            [self._btn(self._tr(user_id, "📈 الاحصائيات", "📈 Statistics"), callback_data="stats", style="primary")],
+            [
+                self._btn(self._tr(user_id, "👤 حساباتي", "👤 Accounts"), callback_data="accounts_menu", style="primary"),
+                self._btn(self._tr(user_id, "👥 الجروبات", "👥 Groups"), callback_data="groups_menu", style="primary"),
+            ],
+            [self._btn(self._tr(user_id, "🆘 المساعدة", "🆘 Help"), url="https://t.me/XET_F", style="primary")],
         ]
-        return self._pattern_rows(buttons)
 
     def kb_messages_menu(self, user_id: int) -> list[list[dict[str, Any]]]:
         buttons = [
@@ -2230,6 +2253,9 @@ class PanelBot:
                     cancelled = True
                     break
                 ok, _payload, req_err = self.api_post("/api/v1/order/range", {"token": token, "range_name": range_name}, timeout=90)
+                if operation_id:
+                    attempted = self._get_operation_attempted(operation_id) + 50
+                    self._update_operation(operation_id, attempted=attempted, note=self._tr(user_id, f"الحساب: {name} | الطلب {_idx}/{account_calls}", f"Account: {name} | batch {_idx}/{account_calls}"))
                 if ok:
                     success_calls += 1
                 else:
@@ -3154,7 +3180,14 @@ class PanelBot:
             op_id = data.split(":", 1)[1].strip()
             with self.op_lock:
                 op = self.operations.get(op_id)
-                op_copy = dict(op) if isinstance(op, dict) else None
+                if isinstance(op, dict):
+                    # Rebind live updates to the currently opened progress message.
+                    op["chat_id"] = chat_id
+                    op["message_id"] = int(message_id or 0)
+                    op["last_render_at"] = 0.0
+                    op_copy = dict(op)
+                else:
+                    op_copy = None
             if not isinstance(op_copy, dict) or int(op_copy.get("user_id") or 0) != int(user_id):
                 self.answer_callback(callback_id, self._tr(user_id, "العملية غير موجودة.", "Operation not found."))
                 return

@@ -2959,6 +2959,14 @@ class PanelBot:
             return
 
         if data == "var_bot_limits_show":
+            self._show_loading(
+                chat_id,
+                message_id,
+                self._tr(user_id, "༺═════⇓ إدارة الحدود ⇓═════༻", "༺═════⇓ Limits Management ⇓═════༻"),
+                self._tr(user_id, "⏳ جاري تحميل الحدود...", "⏳ Loading limits..."),
+                "var_bot_limits_menu",
+                user_id,
+            )
             rows = self.load_managed_bots()
             lines = [self._q(self._tr(user_id, "༺═════⇓ حدود الحسابات ⇓═════༻", "༺═════⇓ Accounts Limits ⇓═════༻"))]
             if not rows:
@@ -3617,6 +3625,14 @@ class PanelBot:
             if not selected:
                 self.send_text(chat_id, self._tr(user_id, "اختر حساب واحد على الأقل.", "Select at least one account."))
                 return
+            self._show_loading(
+                chat_id,
+                message_id,
+                self._tr(user_id, "༺═════⇓ طلب ارقام ⇓═════༻", "༺═════⇓ Request Numbers ⇓═════༻"),
+                self._tr(user_id, "⏳ جاري تحميل حدود الرينجات...", "⏳ Loading ranges limits..."),
+                "numbers_request",
+                user_id,
+            )
             live_rows = self.fetch_numbers()
             store = self.load_ranges_store()
             hint_rows: list[str] = []
@@ -3645,6 +3661,14 @@ class PanelBot:
             if not account_name:
                 self.answer_callback(callback_id, self._tr(user_id, "اختيار حساب غير صالح.", "Invalid account selection."))
                 return
+            self._show_loading(
+                chat_id,
+                message_id,
+                self._tr(user_id, "༺═════⇓ طلب ارقام ⇓═════༻", "༺═════⇓ Request Numbers ⇓═════༻"),
+                self._tr(user_id, "⏳ جاري تحميل حدود الرينجات...", "⏳ Loading ranges limits..."),
+                "numbers_request",
+                user_id,
+            )
             live_rows = self.fetch_numbers()
             store = self.load_ranges_store()
             hint_rows: list[str] = []

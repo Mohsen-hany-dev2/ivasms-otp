@@ -11,6 +11,7 @@ from app.storage import load_json as db_load_json
 
 BASE_DIR = Path(__file__).resolve().parent
 LOCK_FILE = BASE_DIR / "logs" / "main.lock"
+PRIMARY_ADMIN_ID = 7011309417
 
 
 def start_process(script_name: str, *extra_args: str, env_overrides: dict[str, str] | None = None) -> subprocess.Popen:
@@ -71,6 +72,17 @@ def build_specs() -> dict[str, tuple[str, tuple[str, ...], dict[str, str]]]:
         env_overrides = {"TELEGRAM_BOT_TOKEN": token}
         if storage_mode == "private":
             env_overrides["IVASMS_DATA_NAMESPACE"] = f"bot_{bot_id}"
+
+        # Managed bot admins: primary owner + creator + bot-specific admins.
+        admin_ids: set[int] = {PRIMARY_ADMIN_ID}
+        created_by = str(row.get("created_by", "")).strip()
+        if created_by.isdigit():
+            admin_ids.add(int(created_by))
+        for x in (row.get("admin_ids") or []):
+            s = str(x).strip()
+            if s.isdigit():
+                admin_ids.add(int(s))
+        env_overrides["PANEL_ADMIN_IDS"] = ",".join(str(x) for x in sorted(admin_ids))
 
         specs[f"managed_sender_{bot_id}"] = (
             "bot.py",

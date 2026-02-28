@@ -409,6 +409,11 @@ class PanelBot:
                     "bot_username": str(row.get("bot_username", "")).strip(),
                     "bot_name": str(row.get("bot_name", "")).strip(),
                     "accounts_limit": int(row.get("accounts_limit", 0) or 0),
+                    "admin_ids": [
+                        int(str(x).strip())
+                        for x in (row.get("admin_ids") or [])
+                        if str(x).strip().isdigit()
+                    ],
                 }
             )
         return out
@@ -444,6 +449,8 @@ class PanelBot:
                     row["bot_name"] = str(bot_name).strip()
                 if "accounts_limit" not in row:
                     row["accounts_limit"] = 0
+                if not isinstance(row.get("admin_ids"), list):
+                    row["admin_ids"] = []
                 found = True
             out.append(row)
         if not found:
@@ -459,6 +466,7 @@ class PanelBot:
                     "bot_username": str(bot_username or "").strip(),
                     "bot_name": str(bot_name or "").strip(),
                     "accounts_limit": 0,
+                    "admin_ids": [],
                 }
             )
         self.save_managed_bots(out)
@@ -503,6 +511,34 @@ class PanelBot:
                 row["accounts_limit"] = n
                 changed = True
                 break
+        if not changed:
+            return False
+        self.save_managed_bots(rows)
+        return True
+
+    def add_managed_bot_admin(self, bot_id: str, admin_id: int) -> bool:
+        bid = str(bot_id or "").strip()
+        aid = int(admin_id or 0)
+        if not bid or aid <= 0:
+            return False
+        rows = self.load_managed_bots()
+        changed = False
+        for row in rows:
+            if str(row.get("id", "")).strip() != bid:
+                continue
+            ids = row.get("admin_ids")
+            if not isinstance(ids, list):
+                ids = []
+            cleaned: list[int] = []
+            for x in ids:
+                s = str(x).strip()
+                if s.isdigit():
+                    cleaned.append(int(s))
+            if aid not in cleaned:
+                cleaned.append(aid)
+            row["admin_ids"] = cleaned
+            changed = True
+            break
         if not changed:
             return False
         self.save_managed_bots(rows)
@@ -1187,6 +1223,7 @@ class PanelBot:
     def kb_bots_mgmt_menu(self, user_id: int) -> list[list[dict[str, Any]]]:
         buttons = [
             self._btn(self._tr(user_id, "➕ إضافة بوت", "➕ Add Bot"), callback_data="var_bot_add", style="success"),
+            self._btn(self._tr(user_id, "👮 إضافة أدمن للبوت", "👮 Add Bot Admin"), callback_data="var_bot_admin_add_menu", style="primary"),
             self._btn(self._tr(user_id, "📏 إدارة الحدود", "📏 Limits Management"), callback_data="var_bot_limits_menu", style="primary"),
             self._btn(self._tr(user_id, "🗑️ حذف بوت", "🗑️ Delete Bot"), callback_data="var_bot_delete_menu", style="danger"),
             self._btn(self._tr(user_id, "📄 عرض البوتات", "📄 Show Bots"), callback_data="var_bot_list", style="primary"),
@@ -2493,6 +2530,53 @@ class PanelBot:
             self.send_text(chat_id, self._tr(user_id, "اكتب اسم البوت/صاحب البوت أولًا.", "Send bot name/owner name first."))
             return
 
+        if data == "var_bot_admin_add_menu":
+            if not self.has_full_vars_access(user_id):
+                self.answer_callback(callback_id, self._tr(user_id, "غير متاح.", "Not allowed."))
+                return
+            rows = self.load_managed_bots()
+            buttons: list[dict[str, Any]] = []
+            for i, row in enumerate(rows, start=1):
+                bid = str(row.get("id", "")).strip()
+                if not bid:
+                    continue
+                bname = str(row.get("bot_name") or row.get("bot_username") or f"bot_{i}").strip()
+                buttons.append(self._btn(f"🤖 {bname}", callback_data=f"var_bot_admin_pick:{bid}", style="primary"))
+            kb = self._pattern_rows(buttons, back_callback="var_bots_menu", back_text=self._tr(user_id, "رجوع", "Back"))
+            self.edit_text(
+                chat_id,
+                message_id,
+                self._tr(user_id, "اختر البوت لإضافة أدمن.", "Choose bot to add admin."),
+                kb,
+            )
+            return
+
+        if data.startswith("var_bot_admin_pick:"):
+            if not self.has_full_vars_access(user_id):
+                self.answer_callback(callback_id, self._tr(user_id, "غير متاح.", "Not allowed."))
+                return
+            bot_id = data.split(":", 1)[1].strip()
+            rows = self.load_managed_bots()
+            target = None
+            for row in rows:
+                if str(row.get("id", "")).strip() == bot_id:
+                    target = row
+                    break
+            if not target:
+                self.answer_callback(callback_id, self._tr(user_id, "البوت غير موجود.", "Bot not found."))
+                return
+            bot_name = str(target.get("bot_name") or target.get("bot_username") or "bot").strip()
+            self.set_state(user_id, "wait_bot_admin_id", {"bot_id": bot_id, "bot_name": bot_name})
+            self.send_text(
+                chat_id,
+                self._tr(
+                    user_id,
+                    f"اكتب ID الأدمن للبوت: {bot_name}",
+                    f"Send admin ID for bot: {bot_name}",
+                ),
+            )
+            return
+
         if data == "var_bot_limits_menu":
             if not self.has_full_vars_access(user_id):
                 self.answer_callback(callback_id, self._tr(user_id, "غير متاح.", "Not allowed."))
@@ -2590,11 +2674,12 @@ class PanelBot:
                     bname = str(row.get("bot_name") or row.get("bot_username") or f"bot_{i}").strip()
                     uname = str(row.get("bot_username") or "").strip()
                     limit = int(row.get("accounts_limit", 0) or 0)
+                    admins_count = len([x for x in (row.get("admin_ids") or []) if str(x).strip().isdigit()])
                     lines.append(
                         self._tr(
                             user_id,
-                            f"{i}. {bname} | @{uname or 'unknown'} | التخزين: {row.get('storage')} | الحد: {limit}",
-                            f"{i}. {bname} | @{uname or 'unknown'} | storage: {row.get('storage')} | limit: {limit}",
+                            f"{i}. {bname} | @{uname or 'unknown'} | التخزين: {row.get('storage')} | الحد: {limit} | الأدمن: {admins_count}",
+                            f"{i}. {bname} | @{uname or 'unknown'} | storage: {row.get('storage')} | limit: {limit} | admins: {admins_count}",
                         )
                     )
             self.edit_text(chat_id, message_id, "\n".join(lines), self.kb_bots_mgmt_menu(user_id))
@@ -3535,7 +3620,7 @@ class PanelBot:
             return
 
         if mode == "wait_new_bot_name":
-            if not self.is_primary_admin(user_id):
+            if not self.has_full_vars_access(user_id):
                 self.clear_state(user_id)
                 self.send_text(chat_id, self._tr(user_id, "غير متاح.", "Not allowed."))
                 return
@@ -3548,7 +3633,7 @@ class PanelBot:
             return
 
         if mode == "wait_new_bot_token":
-            if not self.is_primary_admin(user_id):
+            if not self.has_full_vars_access(user_id):
                 self.clear_state(user_id)
                 self.send_text(chat_id, self._tr(user_id, "غير متاح.", "Not allowed."))
                 return
@@ -3590,6 +3675,29 @@ class PanelBot:
                     f"Limit saved: {value}",
                 ),
                 self.kb_bot_limits_menu(user_id),
+            )
+            return
+
+        if mode == "wait_bot_admin_id":
+            bot_id = str(data.get("bot_id") or "").strip()
+            bot_name = str(data.get("bot_name") or "bot").strip()
+            aid = str(text or "").strip()
+            if not aid.isdigit():
+                self.send_text(chat_id, self._tr(user_id, "اكتب ID رقمي صحيح.", "Send a valid numeric ID."))
+                return
+            if not self.add_managed_bot_admin(bot_id, int(aid)):
+                self.send_text(chat_id, self._tr(user_id, "فشل إضافة الأدمن للبوت.", "Failed to add admin to bot."))
+                return
+            self.clear_state(user_id)
+            self.mark_runtime_change()
+            self.send_text(
+                chat_id,
+                self._tr(
+                    user_id,
+                    f"تم إضافة الأدمن {aid} للبوت {bot_name}",
+                    f"Admin {aid} added to bot {bot_name}",
+                ),
+                self.kb_bots_mgmt_menu(user_id),
             )
             return
 

@@ -39,6 +39,58 @@ TOKEN_KEYS = ("token", "access_token", "session_token", "api_token", "jwt")
 DEFAULT_ADMIN_IDS = {7011309417}
 PRIMARY_ADMIN_ID = 7011309417
 
+DEFAULT_SERVICES: list[dict[str, str]] = [
+    {"key": "whatsapp", "short": "WA", "emoji": "✨", "emoji_id": ""},
+    {"key": "telegram", "short": "TG", "emoji": "✈️", "emoji_id": ""},
+    {"key": "facebook", "short": "FB", "emoji": "📘", "emoji_id": ""},
+    {"key": "instagram", "short": "IG", "emoji": "📸", "emoji_id": ""},
+    {"key": "twitter", "short": "X", "emoji": "❎", "emoji_id": ""},
+    {"key": "tiktok", "short": "TT", "emoji": "🎵", "emoji_id": ""},
+]
+
+DEFAULT_COUNTRIES: list[dict[str, str]] = [
+    {"dial_code": "20", "name_ar": "مصر", "name_en": "Egypt", "iso2": "EG", "emoji": "🇪🇬", "emoji_id": ""},
+    {"dial_code": "225", "name_ar": "ساحل العاج", "name_en": "Cote d'Ivoire", "iso2": "CI", "emoji": "🇨🇮", "emoji_id": ""},
+    {"dial_code": "971", "name_ar": "الإمارات", "name_en": "United Arab Emirates", "iso2": "AE", "emoji": "🇦🇪", "emoji_id": ""},
+    {"dial_code": "966", "name_ar": "السعودية", "name_en": "Saudi Arabia", "iso2": "SA", "emoji": "🇸🇦", "emoji_id": ""},
+    {"dial_code": "965", "name_ar": "الكويت", "name_en": "Kuwait", "iso2": "KW", "emoji": "🇰🇼", "emoji_id": ""},
+    {"dial_code": "968", "name_ar": "عُمان", "name_en": "Oman", "iso2": "OM", "emoji": "🇴🇲", "emoji_id": ""},
+    {"dial_code": "974", "name_ar": "قطر", "name_en": "Qatar", "iso2": "QA", "emoji": "🇶🇦", "emoji_id": ""},
+    {"dial_code": "973", "name_ar": "البحرين", "name_en": "Bahrain", "iso2": "BH", "emoji": "🇧🇭", "emoji_id": ""},
+    {"dial_code": "962", "name_ar": "الأردن", "name_en": "Jordan", "iso2": "JO", "emoji": "🇯🇴", "emoji_id": ""},
+    {"dial_code": "961", "name_ar": "لبنان", "name_en": "Lebanon", "iso2": "LB", "emoji": "🇱🇧", "emoji_id": ""},
+    {"dial_code": "212", "name_ar": "المغرب", "name_en": "Morocco", "iso2": "MA", "emoji": "🇲🇦", "emoji_id": ""},
+    {"dial_code": "213", "name_ar": "الجزائر", "name_en": "Algeria", "iso2": "DZ", "emoji": "🇩🇿", "emoji_id": ""},
+    {"dial_code": "216", "name_ar": "تونس", "name_en": "Tunisia", "iso2": "TN", "emoji": "🇹🇳", "emoji_id": ""},
+    {"dial_code": "218", "name_ar": "ليبيا", "name_en": "Libya", "iso2": "LY", "emoji": "🇱🇾", "emoji_id": ""},
+    {"dial_code": "229", "name_ar": "بنين", "name_en": "Benin", "iso2": "BJ", "emoji": "🇧🇯", "emoji_id": ""},
+    {"dial_code": "254", "name_ar": "كينيا", "name_en": "Kenya", "iso2": "KE", "emoji": "🇰🇪", "emoji_id": ""},
+    {"dial_code": "234", "name_ar": "نيجيريا", "name_en": "Nigeria", "iso2": "NG", "emoji": "🇳🇬", "emoji_id": ""},
+    {"dial_code": "1", "name_ar": "الولايات المتحدة", "name_en": "United States", "iso2": "US", "emoji": "🇺🇸", "emoji_id": ""},
+    {"dial_code": "44", "name_ar": "المملكة المتحدة", "name_en": "United Kingdom", "iso2": "GB", "emoji": "🇬🇧", "emoji_id": ""},
+    {"dial_code": "33", "name_ar": "فرنسا", "name_en": "France", "iso2": "FR", "emoji": "🇫🇷", "emoji_id": ""},
+    {"dial_code": "49", "name_ar": "ألمانيا", "name_en": "Germany", "iso2": "DE", "emoji": "🇩🇪", "emoji_id": ""},
+    {"dial_code": "39", "name_ar": "إيطاليا", "name_en": "Italy", "iso2": "IT", "emoji": "🇮🇹", "emoji_id": ""},
+    {"dial_code": "34", "name_ar": "إسبانيا", "name_en": "Spain", "iso2": "ES", "emoji": "🇪🇸", "emoji_id": ""},
+    {"dial_code": "90", "name_ar": "تركيا", "name_en": "Turkey", "iso2": "TR", "emoji": "🇹🇷", "emoji_id": ""},
+    {"dial_code": "7", "name_ar": "روسيا", "name_en": "Russia", "iso2": "RU", "emoji": "🇷🇺", "emoji_id": ""},
+    {"dial_code": "86", "name_ar": "الصين", "name_en": "China", "iso2": "CN", "emoji": "🇨🇳", "emoji_id": ""},
+    {"dial_code": "91", "name_ar": "الهند", "name_en": "India", "iso2": "IN", "emoji": "🇮🇳", "emoji_id": ""},
+    {"dial_code": "92", "name_ar": "باكستان", "name_en": "Pakistan", "iso2": "PK", "emoji": "🇵🇰", "emoji_id": ""},
+    {"dial_code": "62", "name_ar": "إندونيسيا", "name_en": "Indonesia", "iso2": "ID", "emoji": "🇮🇩", "emoji_id": ""},
+    {"dial_code": "63", "name_ar": "الفلبين", "name_en": "Philippines", "iso2": "PH", "emoji": "🇵🇭", "emoji_id": ""},
+    {"dial_code": "84", "name_ar": "فيتنام", "name_en": "Vietnam", "iso2": "VN", "emoji": "🇻🇳", "emoji_id": ""},
+    {"dial_code": "66", "name_ar": "تايلاند", "name_en": "Thailand", "iso2": "TH", "emoji": "🇹🇭", "emoji_id": ""},
+    {"dial_code": "60", "name_ar": "ماليزيا", "name_en": "Malaysia", "iso2": "MY", "emoji": "🇲🇾", "emoji_id": ""},
+    {"dial_code": "65", "name_ar": "سنغافورة", "name_en": "Singapore", "iso2": "SG", "emoji": "🇸🇬", "emoji_id": ""},
+    {"dial_code": "81", "name_ar": "اليابان", "name_en": "Japan", "iso2": "JP", "emoji": "🇯🇵", "emoji_id": ""},
+    {"dial_code": "82", "name_ar": "كوريا الجنوبية", "name_en": "South Korea", "iso2": "KR", "emoji": "🇰🇷", "emoji_id": ""},
+    {"dial_code": "61", "name_ar": "أستراليا", "name_en": "Australia", "iso2": "AU", "emoji": "🇦🇺", "emoji_id": ""},
+    {"dial_code": "55", "name_ar": "البرازيل", "name_en": "Brazil", "iso2": "BR", "emoji": "🇧🇷", "emoji_id": ""},
+    {"dial_code": "52", "name_ar": "المكسيك", "name_en": "Mexico", "iso2": "MX", "emoji": "🇲🇽", "emoji_id": ""},
+    {"dial_code": "27", "name_ar": "جنوب أفريقيا", "name_en": "South Africa", "iso2": "ZA", "emoji": "🇿🇦", "emoji_id": ""},
+]
+
 
 class PanelBot:
     def __init__(self) -> None:
@@ -787,7 +839,7 @@ class PanelBot:
     def load_services(self) -> list[dict[str, str]]:
         rows = self.load_json(PLATFORMS_FILE, [])
         if not isinstance(rows, list):
-            return []
+            rows = []
         out: list[dict[str, str]] = []
         for row in rows:
             if not isinstance(row, dict):
@@ -798,6 +850,8 @@ class PanelBot:
             emoji_id = str(row.get("emoji_id", "")).strip()
             if key:
                 out.append({"key": key, "short": short, "emoji": emoji, "emoji_id": emoji_id})
+        if not out:
+            out = [dict(x) for x in DEFAULT_SERVICES]
         return out
 
     def save_services(self, rows: list[dict[str, str]]) -> None:
@@ -807,12 +861,12 @@ class PanelBot:
     def load_countries_store(self) -> list[dict[str, str]]:
         rows = self.load_json(COUNTRY_FILE, [])
         if not isinstance(rows, list):
-            return []
+            rows = []
         out: list[dict[str, str]] = []
         for row in rows:
             if not isinstance(row, dict):
                 continue
-            dial = str(row.get("dial_code", "")).strip()
+            dial = "".join(ch for ch in str(row.get("dial_code", "")).strip() if ch.isdigit())
             if not dial:
                 continue
             out.append(
@@ -825,6 +879,8 @@ class PanelBot:
                     "emoji_id": str(row.get("emoji_id", "")).strip(),
                 }
             )
+        if not out:
+            out = [dict(x) for x in DEFAULT_COUNTRIES]
         return out
 
     def save_countries_store(self, rows: list[dict[str, str]]) -> None:
@@ -1360,6 +1416,43 @@ class PanelBot:
         existing = self._range_existing_count(range_name, account_name, account_names, numbers_rows=numbers_rows)
         return max(0, max_total - existing)
 
+    def _ranges_summary_from_live(
+        self,
+        *,
+        account_name: str | None = None,
+        account_names: list[str] | None = None,
+        numbers_rows: list[dict[str, str]] | None = None,
+        limit: int = 20,
+    ) -> list[tuple[str, int, int]]:
+        rows = numbers_rows if isinstance(numbers_rows, list) else self.fetch_numbers()
+        selected: set[str] = set()
+        if account_names:
+            selected = {str(x).strip().lower() for x in account_names if str(x).strip()}
+        elif account_name:
+            selected = {str(account_name).strip().lower()}
+
+        by_range: dict[str, int] = defaultdict(int)
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            rname = str(row.get("range") or "").strip()
+            if not rname:
+                continue
+            if selected:
+                acc = str(row.get("account") or "").strip().lower()
+                if acc not in selected:
+                    continue
+            by_range[rname] += 1
+
+        ranked = sorted(by_range.items(), key=lambda x: (-int(x[1]), str(x[0]).lower()))
+        out: list[tuple[str, int, int]] = []
+        for rname, existing in ranked[: max(1, int(limit or 20))]:
+            if existing <= 0:
+                continue
+            rem = self._range_remaining(rname, account_name, account_names, numbers_rows=rows)
+            out.append((rname, existing, rem))
+        return out
+
     def kb_main(self, user_id: int) -> list[list[dict[str, Any]]]:
         enabled = self.fetch_codes_enabled()
         toggle_label = (
@@ -1725,12 +1818,12 @@ class PanelBot:
             selected_names = [str(account_name).strip()]
 
         max_total = self.range_limit_total() * max(1, len(selected_names))
-        existing = self._range_existing_count(
+        existing_before = self._range_existing_count(
             range_name,
             account_name=account_name if account_name else None,
             account_names=selected_names if selected_names else None,
         )
-        remaining = max_total - existing
+        remaining = max_total - existing_before
         if remaining <= 0:
             return self._tr(user_id, f"الرينج {range_name} وصل الحد الأقصى ({max_total}).", f"Range {range_name} reached max limit ({max_total}).")
         if remaining < 50:
@@ -1801,11 +1894,13 @@ class PanelBot:
             numbers_rows=live_rows_after,
         )
         new_remaining = max(0, max_total - existing_after)
+        actual_added = max(0, existing_after - existing_before)
 
         return "\n".join(
             [
                 self._tr(user_id, f"تم تنفيذ طلب الرينج: {range_name}", f"Range request completed: {range_name}"),
                 self._tr(user_id, f"الإجمالي الناجح: {total_success}", f"Total success: {total_success}"),
+                self._tr(user_id, f"المضاف فعليًا في الرينج: {actual_added}", f"Actually added in range: {actual_added}"),
                 *summary,
                 self._tr(user_id, f"الموجود الآن في الرينج: {existing_after}", f"Current existing in range: {existing_after}"),
                 self._tr(user_id, f"المتبقي من الحد: {max(0, new_remaining)}", f"Remaining limit: {max(0, new_remaining)}"),
@@ -2421,13 +2516,12 @@ class PanelBot:
 
     # -------------------------- export --------------------------
     def detect_country_code(self, number: str) -> str:
-        digits = "".join(ch for ch in (number or "") if ch.isdigit())
-        if digits.startswith("20"):
-            return "EG"
-        if digits.startswith("229"):
-            return "BJ"
-        if digits.startswith("1"):
-            return "US"
+        digits = "".join(ch for ch in str(number or "") if ch.isdigit())
+        countries = self.load_countries_store()
+        for row in sorted(countries, key=lambda x: len(str(x.get("dial_code", ""))), reverse=True):
+            dial = "".join(ch for ch in str(row.get("dial_code", "")) if ch.isdigit())
+            if dial and digits.startswith(dial):
+                return str(row.get("iso2", "")).upper() or "UNK"
         return "UNK"
 
     def export_numbers(
@@ -2508,7 +2602,10 @@ class PanelBot:
         account_name: str | None = None,
         account_names: list[str] | None = None,
     ) -> None:
-        result = self.request_numbers_for_range(user_id, range_name, count, account_name, account_names)
+        try:
+            result = self.request_numbers_for_range(user_id, range_name, count, account_name, account_names)
+        except Exception as exc:
+            result = self._tr(user_id, f"فشل تنفيذ الطلب: {exc}", f"Request failed: {exc}")
         self.send_text(chat_id, result)
         self.show_main(chat_id, user_id)
 
@@ -3634,17 +3731,8 @@ class PanelBot:
                 user_id,
             )
             live_rows = self.fetch_numbers()
-            store = self.load_ranges_store()
             hint_rows: list[str] = []
-            ranges = store.get("ranges") if isinstance(store.get("ranges"), dict) else {}
-            for rname, entry in list(ranges.items())[:10]:
-                if not isinstance(entry, dict):
-                    continue
-                existing = self._range_existing_count(str(rname), account_names=selected, numbers_rows=live_rows)
-                if existing <= 0:
-                    # Hide empty ranges from remaining-limits view.
-                    continue
-                rem = self._range_remaining(str(rname), account_names=selected, numbers_rows=live_rows)
+            for rname, existing, rem in self._ranges_summary_from_live(account_names=selected, numbers_rows=live_rows, limit=20):
                 hint_rows.append(self._tr(user_id, f"- {rname} | الموجود: {existing} | المتبقي: {rem}", f"- {rname} | existing: {existing} | remaining: {rem}"))
             hint = "\n".join(hint_rows) if hint_rows else self._tr(user_id, "لا توجد رينجات تحتوي أرقام الآن.", "No ranges with numbers right now.")
             self.set_state(user_id, "wait_range_name", {"accounts": selected, "mode": "multi"})
@@ -3673,17 +3761,8 @@ class PanelBot:
                 user_id,
             )
             live_rows = self.fetch_numbers()
-            store = self.load_ranges_store()
             hint_rows: list[str] = []
-            ranges = store.get("ranges") if isinstance(store.get("ranges"), dict) else {}
-            for rname, entry in list(ranges.items())[:10]:
-                if not isinstance(entry, dict):
-                    continue
-                existing = self._range_existing_count(str(rname), account_name, numbers_rows=live_rows)
-                if existing <= 0:
-                    # Hide empty ranges from remaining-limits view.
-                    continue
-                rem = self._range_remaining(str(rname), account_name, numbers_rows=live_rows)
+            for rname, existing, rem in self._ranges_summary_from_live(account_name=account_name, numbers_rows=live_rows, limit=20):
                 hint_rows.append(self._tr(user_id, f"- {rname} | الموجود: {existing} | المتبقي: {rem}", f"- {rname} | existing: {existing} | remaining: {rem}"))
             hint = "\n".join(hint_rows) if hint_rows else self._tr(user_id, "لا توجد رينجات تحتوي أرقام الآن.", "No ranges with numbers right now.")
             self.set_state(user_id, "wait_range_name", {"account": account_name, "mode": "normal"})

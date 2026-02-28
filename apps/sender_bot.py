@@ -50,6 +50,49 @@ DEFAULT_GROUP_SEND_INTERVAL_SECONDS = 0.2
 DEFAULT_FETCH_TIMEOUT_SECONDS = 90
 _LAST_LOG_AT: dict[str, int] = {}
 
+DEFAULT_COUNTRIES: list[dict[str, str]] = [
+    {"dial_code": "20", "name_ar": "مصر", "name_en": "Egypt", "iso2": "EG", "emoji": "🇪🇬", "emoji_id": ""},
+    {"dial_code": "225", "name_ar": "ساحل العاج", "name_en": "Cote d'Ivoire", "iso2": "CI", "emoji": "🇨🇮", "emoji_id": ""},
+    {"dial_code": "971", "name_ar": "الإمارات", "name_en": "United Arab Emirates", "iso2": "AE", "emoji": "🇦🇪", "emoji_id": ""},
+    {"dial_code": "966", "name_ar": "السعودية", "name_en": "Saudi Arabia", "iso2": "SA", "emoji": "🇸🇦", "emoji_id": ""},
+    {"dial_code": "965", "name_ar": "الكويت", "name_en": "Kuwait", "iso2": "KW", "emoji": "🇰🇼", "emoji_id": ""},
+    {"dial_code": "968", "name_ar": "عُمان", "name_en": "Oman", "iso2": "OM", "emoji": "🇴🇲", "emoji_id": ""},
+    {"dial_code": "974", "name_ar": "قطر", "name_en": "Qatar", "iso2": "QA", "emoji": "🇶🇦", "emoji_id": ""},
+    {"dial_code": "973", "name_ar": "البحرين", "name_en": "Bahrain", "iso2": "BH", "emoji": "🇧🇭", "emoji_id": ""},
+    {"dial_code": "962", "name_ar": "الأردن", "name_en": "Jordan", "iso2": "JO", "emoji": "🇯🇴", "emoji_id": ""},
+    {"dial_code": "961", "name_ar": "لبنان", "name_en": "Lebanon", "iso2": "LB", "emoji": "🇱🇧", "emoji_id": ""},
+    {"dial_code": "212", "name_ar": "المغرب", "name_en": "Morocco", "iso2": "MA", "emoji": "🇲🇦", "emoji_id": ""},
+    {"dial_code": "213", "name_ar": "الجزائر", "name_en": "Algeria", "iso2": "DZ", "emoji": "🇩🇿", "emoji_id": ""},
+    {"dial_code": "216", "name_ar": "تونس", "name_en": "Tunisia", "iso2": "TN", "emoji": "🇹🇳", "emoji_id": ""},
+    {"dial_code": "218", "name_ar": "ليبيا", "name_en": "Libya", "iso2": "LY", "emoji": "🇱🇾", "emoji_id": ""},
+    {"dial_code": "229", "name_ar": "بنين", "name_en": "Benin", "iso2": "BJ", "emoji": "🇧🇯", "emoji_id": ""},
+    {"dial_code": "254", "name_ar": "كينيا", "name_en": "Kenya", "iso2": "KE", "emoji": "🇰🇪", "emoji_id": ""},
+    {"dial_code": "234", "name_ar": "نيجيريا", "name_en": "Nigeria", "iso2": "NG", "emoji": "🇳🇬", "emoji_id": ""},
+    {"dial_code": "1", "name_ar": "الولايات المتحدة", "name_en": "United States", "iso2": "US", "emoji": "🇺🇸", "emoji_id": ""},
+    {"dial_code": "44", "name_ar": "المملكة المتحدة", "name_en": "United Kingdom", "iso2": "GB", "emoji": "🇬🇧", "emoji_id": ""},
+    {"dial_code": "33", "name_ar": "فرنسا", "name_en": "France", "iso2": "FR", "emoji": "🇫🇷", "emoji_id": ""},
+    {"dial_code": "49", "name_ar": "ألمانيا", "name_en": "Germany", "iso2": "DE", "emoji": "🇩🇪", "emoji_id": ""},
+    {"dial_code": "39", "name_ar": "إيطاليا", "name_en": "Italy", "iso2": "IT", "emoji": "🇮🇹", "emoji_id": ""},
+    {"dial_code": "34", "name_ar": "إسبانيا", "name_en": "Spain", "iso2": "ES", "emoji": "🇪🇸", "emoji_id": ""},
+    {"dial_code": "90", "name_ar": "تركيا", "name_en": "Turkey", "iso2": "TR", "emoji": "🇹🇷", "emoji_id": ""},
+    {"dial_code": "7", "name_ar": "روسيا", "name_en": "Russia", "iso2": "RU", "emoji": "🇷🇺", "emoji_id": ""},
+    {"dial_code": "86", "name_ar": "الصين", "name_en": "China", "iso2": "CN", "emoji": "🇨🇳", "emoji_id": ""},
+    {"dial_code": "91", "name_ar": "الهند", "name_en": "India", "iso2": "IN", "emoji": "🇮🇳", "emoji_id": ""},
+    {"dial_code": "92", "name_ar": "باكستان", "name_en": "Pakistan", "iso2": "PK", "emoji": "🇵🇰", "emoji_id": ""},
+    {"dial_code": "62", "name_ar": "إندونيسيا", "name_en": "Indonesia", "iso2": "ID", "emoji": "🇮🇩", "emoji_id": ""},
+    {"dial_code": "63", "name_ar": "الفلبين", "name_en": "Philippines", "iso2": "PH", "emoji": "🇵🇭", "emoji_id": ""},
+    {"dial_code": "84", "name_ar": "فيتنام", "name_en": "Vietnam", "iso2": "VN", "emoji": "🇻🇳", "emoji_id": ""},
+    {"dial_code": "66", "name_ar": "تايلاند", "name_en": "Thailand", "iso2": "TH", "emoji": "🇹🇭", "emoji_id": ""},
+    {"dial_code": "60", "name_ar": "ماليزيا", "name_en": "Malaysia", "iso2": "MY", "emoji": "🇲🇾", "emoji_id": ""},
+    {"dial_code": "65", "name_ar": "سنغافورة", "name_en": "Singapore", "iso2": "SG", "emoji": "🇸🇬", "emoji_id": ""},
+    {"dial_code": "81", "name_ar": "اليابان", "name_en": "Japan", "iso2": "JP", "emoji": "🇯🇵", "emoji_id": ""},
+    {"dial_code": "82", "name_ar": "كوريا الجنوبية", "name_en": "South Korea", "iso2": "KR", "emoji": "🇰🇷", "emoji_id": ""},
+    {"dial_code": "61", "name_ar": "أستراليا", "name_en": "Australia", "iso2": "AU", "emoji": "🇦🇺", "emoji_id": ""},
+    {"dial_code": "55", "name_ar": "البرازيل", "name_en": "Brazil", "iso2": "BR", "emoji": "🇧🇷", "emoji_id": ""},
+    {"dial_code": "52", "name_ar": "المكسيك", "name_en": "Mexico", "iso2": "MX", "emoji": "🇲🇽", "emoji_id": ""},
+    {"dial_code": "27", "name_ar": "جنوب أفريقيا", "name_en": "South Africa", "iso2": "ZA", "emoji": "🇿🇦", "emoji_id": ""},
+]
+
 
 class ColorFormatter(logging.Formatter):
     RESET = "\033[0m"
@@ -136,7 +179,24 @@ def load_json_list(path: Path) -> list[dict]:
 
 
 def load_countries() -> list[dict[str, str]]:
-    rows = [x for x in load_json_list(COUNTRY_FILE) if x.get("dial_code")]
+    rows_raw = load_json_list(COUNTRY_FILE)
+    rows: list[dict[str, str]] = []
+    for row in rows_raw:
+        dial = digits_only(str(row.get("dial_code", "")).strip())
+        if not dial:
+            continue
+        rows.append(
+            {
+                "dial_code": dial,
+                "name_ar": str(row.get("name_ar", "")).strip(),
+                "name_en": str(row.get("name_en", "")).strip(),
+                "iso2": str(row.get("iso2", "")).strip().upper(),
+                "emoji": str(row.get("emoji", "")).strip(),
+                "emoji_id": str(row.get("emoji_id", "")).strip(),
+            }
+        )
+    if not rows:
+        rows = [dict(x) for x in DEFAULT_COUNTRIES]
     rows.sort(key=lambda x: len(str(x.get("dial_code", ""))), reverse=True)
     return rows
 
@@ -314,7 +374,7 @@ def build_message(item: dict, countries: list[dict[str, str]], platforms: dict[s
     semoji_alt = service_emoji_alt(service_name, platform_rows)
     use_custom_emoji = os.getenv("USE_CUSTOM_EMOJI", "0").strip() == "1"
     country = detect_country(raw_number, countries)
-    iso2 = country.get("iso2", "UN")
+    iso2 = str(country.get("iso2") or "UN").upper()
     flag = iso_to_flag(iso2)
     cemoji_id = str(country.get("emoji_id", "")).strip()
     cemoji_alt = str(country.get("emoji", "")).strip() or flag

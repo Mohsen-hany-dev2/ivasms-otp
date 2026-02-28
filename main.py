@@ -70,6 +70,11 @@ def build_specs() -> dict[str, tuple[str, tuple[str, ...], dict[str, str]]]:
             storage_mode = "private"
         bot_id = str(row.get("id", "")).strip() or str(idx)
         env_overrides = {"TELEGRAM_BOT_TOKEN": token}
+        try:
+            bot_accounts_limit = int(str(row.get("accounts_limit", 0)).strip() or "0")
+        except Exception:
+            bot_accounts_limit = 0
+        env_overrides["BOT_ACCOUNTS_LIMIT"] = str(max(0, bot_accounts_limit))
         if storage_mode == "private":
             env_overrides["IVASMS_DATA_NAMESPACE"] = f"bot_{bot_id}"
 

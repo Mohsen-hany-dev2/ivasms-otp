@@ -589,6 +589,38 @@ class PanelBot:
         self.save_json(ACCOUNTS_FILE, rows)
         self.request_bot_restart()
 
+    def get_instance_accounts_limit(self) -> int:
+        # Per-bot limit from supervisor env. 0 means unlimited.
+        raw = str(os.getenv("BOT_ACCOUNTS_LIMIT", "")).strip()
+        if not raw:
+            return 0
+        try:
+            n = int(raw)
+        except Exception:
+            return 0
+        return max(0, n)
+
+    def check_accounts_capacity(self, incoming_rows: list[dict[str, Any]]) -> tuple[bool, int, int]:
+        # Returns: (is_allowed, new_unique_count, remaining_slots_before_add)
+        limit = self.get_instance_accounts_limit()
+        if limit <= 0:
+            return True, 0, 0
+        existing = self.load_accounts()
+        existing_emails = {
+            str(x.get("email", "")).strip().lower()
+            for x in existing
+            if str(x.get("email", "")).strip()
+        }
+        incoming_emails = {
+            str(x.get("email", "")).strip().lower()
+            for x in incoming_rows
+            if str(x.get("email", "")).strip()
+        }
+        new_unique = len([e for e in incoming_emails if e not in existing_emails])
+        current_total = len(existing_emails)
+        remaining = max(0, limit - current_total)
+        return (current_total + new_unique) <= limit, new_unique, remaining
+
     def load_groups(self) -> list[dict[str, Any]]:
         rows = self.load_json(GROUPS_FILE, [])
         if not isinstance(rows, list):
@@ -3790,6 +3822,17 @@ class PanelBot:
             if not rows_in:
                 self.send_text(chat_id, self._tr(user_id, "الصيغة غير صحيحة. المطلوب لكل سطر: name,email,password", "Invalid format. Expected per line: name,email,password"))
                 return
+            ok_capacity, need_new, remaining = self.check_accounts_capacity(rows_in)
+            if not ok_capacity:
+                self.send_text(
+                    chat_id,
+                    self._tr(
+                        user_id,
+                        f"لا يمكن إضافة الحسابات. الحد المسموح: {self.get_instance_accounts_limit()} | المتبقي: {remaining} | المطلوب الجديد: {need_new}",
+                        f"Cannot add accounts. Limit: {self.get_instance_accounts_limit()} | remaining: {remaining} | required new: {need_new}",
+                    ),
+                )
+                return
             rows = self.load_accounts()
             old_by_email = {str(x.get("email", "")).strip().lower(): x for x in rows}
             added = 0
@@ -3958,6 +4001,17 @@ class PanelBot:
         rows_in, bad = self.parse_accounts_items(content)
         if not rows_in:
             self.send_text(chat_id, self._tr(user_id, "الملف لا يحتوي حسابات صالحة.", "The file contains no valid accounts."))
+            return
+        ok_capacity, need_new, remaining = self.check_accounts_capacity(rows_in)
+        if not ok_capacity:
+            self.send_text(
+                chat_id,
+                self._tr(
+                    user_id,
+                    f"لا يمكن إضافة الحسابات من الملف. الحد المسموح: {self.get_instance_accounts_limit()} | المتبقي: {remaining} | المطلوب الجديد: {need_new}",
+                    f"Cannot import accounts. Limit: {self.get_instance_accounts_limit()} | remaining: {remaining} | required new: {need_new}",
+                ),
+            )
             return
         rows = self.load_accounts()
         old_by_email = {str(x.get("email", "")).strip().lower(): x for x in rows}

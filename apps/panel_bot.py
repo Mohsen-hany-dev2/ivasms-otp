@@ -739,15 +739,23 @@ class PanelBot:
         return (current_total + new_unique) <= limit, new_unique, remaining
 
     def load_groups(self) -> list[dict[str, Any]]:
-        rows = self.load_json(GROUPS_FILE, [])
+        rows_any = self.load_json(GROUPS_FILE, [])
+        rows: list[Any] = []
+        if isinstance(rows_any, list):
+            rows = rows_any
+        elif isinstance(rows_any, dict):
+            # Backward compatibility: {"groups":[...]}
+            maybe = rows_any.get("groups")
+            if isinstance(maybe, list):
+                rows = maybe
         if not isinstance(rows, list):
-            return []
+            rows = []
         out: list[dict[str, Any]] = []
         for row in rows:
             if not isinstance(row, dict):
                 continue
-            name = str(row.get("name") or row.get("chat_id") or "group").strip()
-            chat_id = str(row.get("chat_id") or "").strip()
+            name = str(row.get("name") or row.get("chat_id") or row.get("id") or "group").strip()
+            chat_id = str(row.get("chat_id") or row.get("id") or "").strip()
             enabled = bool(row.get("enabled", True))
             if chat_id:
                 out.append({"name": name, "chat_id": chat_id, "enabled": enabled})

@@ -267,11 +267,19 @@ def load_accounts() -> list[dict[str, str]]:
 
 
 def load_groups() -> list[dict[str, str]]:
-    rows = load_json_list(GROUPS_FILE)
+    raw = db_load_json(GROUPS_FILE, [])
+    rows: list[dict] = []
+    if isinstance(raw, list):
+        rows = [x for x in raw if isinstance(x, dict)]
+    elif isinstance(raw, dict):
+        # Backward compatibility: {"groups":[...]}
+        maybe = raw.get("groups")
+        if isinstance(maybe, list):
+            rows = [x for x in maybe if isinstance(x, dict)]
     out: list[dict[str, str]] = []
     for r in rows:
         enabled = bool(r.get("enabled", True))
-        chat_id = str(r.get("chat_id", "")).strip()
+        chat_id = str(r.get("chat_id") or r.get("id") or "").strip()
         name = str(r.get("name", chat_id)).strip() or chat_id
         # Skip placeholder/demo group ids so .env fallback can be used.
         if enabled and is_real_value(chat_id):

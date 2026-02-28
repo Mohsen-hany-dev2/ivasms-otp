@@ -113,25 +113,6 @@ class PanelBot:
         # Full variables are only for the primary admin on the main bot instance.
         return self.is_main_instance() and self.is_primary_admin(user_id)
 
-    def get_main_runtime_cfg(self) -> dict[str, Any]:
-        if self.is_main_instance():
-            cfg = self._load_runtime_cfg()
-            return cfg if isinstance(cfg, dict) else {}
-        db_path = BASE_DIR / "data" / "storage.db"
-        if not db_path.exists():
-            return {}
-        try:
-            conn = sqlite3.connect(db_path)
-            cur = conn.cursor()
-            row = cur.execute("SELECT value FROM kv_store WHERE key='runtime_config'").fetchone()
-            conn.close()
-            if not row:
-                return {}
-            cfg = json.loads(str(row[0]))
-            return cfg if isinstance(cfg, dict) else {}
-        except Exception:
-            return {}
-
     def bump_view_rev(self, user_id: int) -> int:
         uid = int(user_id)
         self.user_view_rev[uid] = int(self.user_view_rev.get(uid, 0)) + 1
@@ -188,12 +169,6 @@ class PanelBot:
             data["language_overrides"] = {}
         if not isinstance(data.get("managed_bots"), list):
             data["managed_bots"] = []
-        if not isinstance(data.get("forced_sub"), dict):
-            data["forced_sub"] = {
-                "enabled": False,
-                "channels": [],
-                "apply_to": ["main"],
-            }
         self.save_json(RUNTIME_CONFIG_FILE, data)
 
     def _load_runtime_cfg(self) -> dict[str, Any]:
@@ -589,117 +564,6 @@ class PanelBot:
         # Unified marker update for any runtime-affecting change.
         self.request_bot_restart()
         self.request_messages_refresh()
-
-    def get_forced_sub_config(self) -> dict[str, Any]:
-        cfg = self.get_main_runtime_cfg()
-        fs = cfg.get("forced_sub")
-        if not isinstance(fs, dict):
-            return {"enabled": False, "channels": [], "apply_to": ["main"]}
-        channels = fs.get("channels")
-        if not isinstance(channels, list):
-            channels = []
-        apply_to = fs.get("apply_to")
-        if not isinstance(apply_to, list):
-            apply_to = ["main"]
-        return {
-            "enabled": bool(fs.get("enabled", False)),
-            "channels": [x for x in channels if isinstance(x, dict)],
-            "apply_to": [str(x).strip() for x in apply_to if str(x).strip()],
-        }
-
-    def save_forced_sub_config(self, forced_sub: dict[str, Any]) -> None:
-        cfg = self._load_runtime_cfg()
-        cfg["forced_sub"] = forced_sub
-        self._save_runtime_cfg(cfg)
-
-    def is_forced_sub_required_here(self) -> bool:
-        fs = self.get_forced_sub_config()
-        if not bool(fs.get("enabled", False)):
-            return False
-        channels = fs.get("channels") if isinstance(fs.get("channels"), list) else []
-        if not channels:
-            return False
-        apply_to = fs.get("apply_to") if isinstance(fs.get("apply_to"), list) else []
-        here = self.instance_key()
-        return here in {str(x).strip() for x in apply_to if str(x).strip()}
-
-    def main_bot_token(self) -> str:
-        token = str(os.getenv("MAIN_BOT_TOKEN", "")).strip()
-        if token:
-            return token
-        return self.bot_token if self.is_main_instance() else ""
-
-    def check_user_subscribed(self, user_id: int) -> tuple[bool, list[dict[str, str]]]:
-        fs = self.get_forced_sub_config()
-        channels = fs.get("channels") if isinstance(fs.get("channels"), list) else []
-        if not channels:
-            return True, []
-        token = self.main_bot_token()
-        if not token:
-            return True, []
-        missing: list[dict[str, str]] = []
-        for row in channels:
-            chat_id = str(row.get("chat_id") or "").strip()
-            if not chat_id:
-                continue
-            try:
-                r = requests.get(
-                    f"https://api.telegram.org/bot{token}/getChatMember",
-                    params={"chat_id": chat_id, "user_id": int(user_id)},
-                    timeout=20,
-                )
-                payload = r.json()
-            except Exception:
-                payload = {"ok": False}
-            status = ""
-            if isinstance(payload, dict) and payload.get("ok") and isinstance(payload.get("result"), dict):
-                status = str(payload["result"].get("status") or "")
-            if status not in {"member", "administrator", "creator"}:
-                missing.append(row)
-        return len(missing) == 0, missing
-
-    def kb_force_sub_menu(self, user_id: int) -> list[list[dict[str, Any]]]:
-        fs = self.get_forced_sub_config()
-        enabled = bool(fs.get("enabled", False))
-        buttons = [
-            self._btn(
-                self._tr(user_id, f"{'🟢' if enabled else '🔴'} حالة الاشتراك", f"{'🟢' if enabled else '🔴'} Force Status"),
-                callback_data="force_sub_toggle",
-                style="success" if not enabled else "danger",
-            ),
-            self._btn(self._tr(user_id, "➕ إضافة قناة", "➕ Add Channel"), callback_data="force_sub_add_channel", style="success"),
-            self._btn(self._tr(user_id, "🗑️ حذف قناة", "🗑️ Delete Channel"), callback_data="force_sub_del_channel_menu", style="danger"),
-            self._btn(self._tr(user_id, "🎯 تحديد البوتات المطبقة", "🎯 Apply To Bots"), callback_data="force_sub_apply_menu", style="primary"),
-            self._btn(self._tr(user_id, "📄 عرض الحالة", "📄 Show Status"), callback_data="force_sub_show", style="primary"),
-        ]
-        return self._pattern_rows(buttons, back_callback="vars_menu", back_text=self._tr(user_id, "رجوع", "Back"))
-
-    def _channel_join_url(self, chat_id: str) -> str:
-        v = str(chat_id or "").strip()
-        if not v:
-            return ""
-        if v.startswith("https://") or v.startswith("http://"):
-            return v
-        if v.startswith("@"):
-            return f"https://t.me/{v[1:]}"
-        return ""
-
-    def force_sub_prompt(self, user_id: int, chat_id: int, message_id: int | None = None) -> None:
-        _ok, missing = self.check_user_subscribed(user_id)
-        buttons: list[dict[str, Any]] = []
-        for row in missing:
-            name = str(row.get("name") or row.get("chat_id") or "Channel").strip()
-            url = self._channel_join_url(str(row.get("chat_id") or ""))
-            if url:
-                buttons.append(self._btn(f"📢 {name}", url=url, style="primary"))
-        buttons.append(self._btn(self._tr(user_id, "✅ تحقق", "✅ Verify"), callback_data="force_sub_verify", style="success"))
-        kb = self._pattern_rows(buttons)
-        text = self._q(self._tr(user_id, "༺═════⇓ الاشتراك الإجباري ⇓═════༻", "༺═════⇓ Forced Subscription ⇓═════༻"))
-        text += "\n" + self._tr(user_id, "اشترك في القنوات ثم اضغط تحقق.", "Join required channels then press Verify.")
-        if message_id:
-            self.edit_text(chat_id, int(message_id), text, kb)
-        else:
-            self.send_text(chat_id, text, kb)
 
     def fetch_codes_enabled(self) -> bool:
         data = self.load_json(RUNTIME_CONFIG_FILE, {"fetch_codes_enabled": True})
@@ -1449,7 +1313,6 @@ class PanelBot:
             self._btn(self._tr(user_id, "👮 إدارة الأدمن", "👮 Admin Management"), callback_data="var_admins_menu", style="primary"),
             self._btn(self._tr(user_id, "🤖 إدارة البوتات", "🤖 Bots Management"), callback_data="var_bots_menu", style="primary"),
             self._btn(self._tr(user_id, "📣 الإذاعة", "📣 Broadcast"), callback_data="settings_broadcast", style="success"),
-            self._btn(self._tr(user_id, "🔒 الاشتراك الإجباري", "🔒 Forced Subscription"), callback_data="force_sub_menu", style="primary"),
             self._btn(self._tr(user_id, "📢 إعدادات النشر", "📢 Publish Settings"), callback_data="publish_settings_menu", style="primary"),
             self._btn(self._tr(user_id, "🔁 إعادة تشغيل البوت", "🔁 Restart Bot"), callback_data="var_restart", style="danger"),
         ]
@@ -2586,24 +2449,7 @@ class PanelBot:
             self.answer_callback(callback_id)
             return
 
-        if self.is_forced_sub_required_here() and data != "force_sub_verify":
-            ok_sub, _missing = self.check_user_subscribed(user_id)
-            if not ok_sub:
-                self.answer_callback(callback_id, self._tr(user_id, "اشترك أولًا.", "Please subscribe first."))
-                self.force_sub_prompt(user_id, int(chat_id), message_id)
-                return
-
         self.answer_callback(callback_id)
-
-        if data == "force_sub_verify":
-            ok_sub, _missing = self.check_user_subscribed(user_id)
-            if ok_sub:
-                self.answer_callback(callback_id, self._tr(user_id, "تم التحقق ✅", "Verified ✅"))
-                self.show_main(chat_id, user_id, message_id)
-            else:
-                self.answer_callback(callback_id, self._tr(user_id, "لم تكتمل بعد.", "Not completed yet."))
-                self.force_sub_prompt(user_id, int(chat_id), message_id)
-            return
 
         if data == "noop":
             return
@@ -2710,169 +2556,6 @@ class PanelBot:
             self.clear_state(user_id)
             self.send_text(chat_id, self._tr(user_id, "جاري الإذاعة...", "Broadcast in progress..."))
             self._run_async(self.run_broadcast, user_id, int(chat_id), msg_text, "", "")
-            return
-
-        if data == "force_sub_menu":
-            if not self.has_full_vars_access(user_id):
-                self.answer_callback(callback_id, self._tr(user_id, "غير متاح.", "Not allowed."))
-                return
-            self.edit_text(
-                chat_id,
-                message_id,
-                self._q(self._tr(user_id, "༺═════⇓ الاشتراك الإجباري ⇓═════༻", "༺═════⇓ Forced Subscription ⇓═════༻"))
-                + "\n"
-                + self._tr(user_id, "اختر الإجراء.", "Choose an action."),
-                self.kb_force_sub_menu(user_id),
-            )
-            return
-
-        if data == "force_sub_show":
-            if not self.has_full_vars_access(user_id):
-                self.answer_callback(callback_id, self._tr(user_id, "غير متاح.", "Not allowed."))
-                return
-            fs = self.get_forced_sub_config()
-            lines = [self._q(self._tr(user_id, "༺═════⇓ الاشتراك الإجباري ⇓═════༻", "༺═════⇓ Forced Subscription ⇓═════༻"))]
-            lines.append(self._tr(user_id, f"الحالة: {'مفعل 🟢' if fs.get('enabled') else 'مغلق 🔴'}", f"Status: {'ON 🟢' if fs.get('enabled') else 'OFF 🔴'}"))
-            channels = fs.get("channels") if isinstance(fs.get("channels"), list) else []
-            if channels:
-                lines.append(self._tr(user_id, "القنوات:", "Channels:"))
-                for i, ch in enumerate(channels, start=1):
-                    lines.append(f"{i}. {ch.get('name') or '-'} | {ch.get('chat_id') or '-'}")
-            else:
-                lines.append(self._tr(user_id, "لا توجد قنوات.", "No channels."))
-            apply_to = fs.get("apply_to") if isinstance(fs.get("apply_to"), list) else []
-            lines.append(self._tr(user_id, f"مطبق على: {', '.join(apply_to) if apply_to else '-'}", f"Applied to: {', '.join(apply_to) if apply_to else '-'}"))
-            self.edit_text(chat_id, message_id, "\n".join(lines), self.kb_force_sub_menu(user_id))
-            return
-
-        if data == "force_sub_toggle":
-            if not self.has_full_vars_access(user_id):
-                self.answer_callback(callback_id, self._tr(user_id, "غير متاح.", "Not allowed."))
-                return
-            fs = self.get_forced_sub_config()
-            fs["enabled"] = not bool(fs.get("enabled", False))
-            self.save_forced_sub_config(fs)
-            self.mark_runtime_change()
-            self.answer_callback(callback_id, self._tr(user_id, "تم التحديث.", "Updated."))
-            self.edit_text(
-                chat_id,
-                message_id,
-                self._q(self._tr(user_id, "༺═════⇓ الاشتراك الإجباري ⇓═════༻", "༺═════⇓ Forced Subscription ⇓═════༻"))
-                + "\n"
-                + self._tr(user_id, "تم تحديث الحالة.", "Status updated."),
-                self.kb_force_sub_menu(user_id),
-            )
-            return
-
-        if data == "force_sub_add_channel":
-            if not self.has_full_vars_access(user_id):
-                self.answer_callback(callback_id, self._tr(user_id, "غير متاح.", "Not allowed."))
-                return
-            self.set_state(user_id, "wait_force_sub_channel")
-            self.send_text(
-                chat_id,
-                self._tr(
-                    user_id,
-                    "اكتب القناة بهذا الشكل:\nname,chat_id_or_username\nمثال: قناة الاخبار,@mychannel",
-                    "Send channel in this format:\nname,chat_id_or_username\nExample: News,@mychannel",
-                ),
-            )
-            return
-
-        if data == "force_sub_del_channel_menu":
-            if not self.has_full_vars_access(user_id):
-                self.answer_callback(callback_id, self._tr(user_id, "غير متاح.", "Not allowed."))
-                return
-            fs = self.get_forced_sub_config()
-            channels = fs.get("channels") if isinstance(fs.get("channels"), list) else []
-            buttons = []
-            for i, ch in enumerate(channels, start=1):
-                title = str(ch.get("name") or ch.get("chat_id") or f"ch_{i}")
-                buttons.append(self._btn(f"🗑️ {title}", callback_data=f"force_sub_del_ch:{i-1}", style="danger"))
-            kb = self._pattern_rows(buttons, back_callback="force_sub_menu", back_text=self._tr(user_id, "رجوع", "Back"))
-            self.edit_text(chat_id, message_id, self._tr(user_id, "اختر قناة للحذف.", "Choose channel to delete."), kb)
-            return
-
-        if data.startswith("force_sub_del_ch:"):
-            if not self.has_full_vars_access(user_id):
-                self.answer_callback(callback_id, self._tr(user_id, "غير متاح.", "Not allowed."))
-                return
-            try:
-                idx = int(data.split(":", 1)[1])
-            except Exception:
-                idx = -1
-            fs = self.get_forced_sub_config()
-            channels = fs.get("channels") if isinstance(fs.get("channels"), list) else []
-            if 0 <= idx < len(channels):
-                channels.pop(idx)
-                fs["channels"] = channels
-                self.save_forced_sub_config(fs)
-                self.mark_runtime_change()
-            self.edit_text(chat_id, message_id, self._tr(user_id, "تم حذف القناة.", "Channel deleted."), self.kb_force_sub_menu(user_id))
-            return
-
-        if data == "force_sub_apply_menu":
-            if not self.has_full_vars_access(user_id):
-                self.answer_callback(callback_id, self._tr(user_id, "غير متاح.", "Not allowed."))
-                return
-            fs = self.get_forced_sub_config()
-            selected = {str(x).strip() for x in (fs.get("apply_to") or []) if str(x).strip()}
-            buttons = []
-            main_checked = "✅" if "main" in selected else "☑️"
-            buttons.append(self._btn(f"{main_checked} MAIN", callback_data="force_sub_apply_toggle:main", style="primary"))
-            rows = self.load_managed_bots()
-            for row in rows:
-                bid = str(row.get("id") or "").strip()
-                if not bid:
-                    continue
-                key = f"managed:{bid}"
-                label = str(row.get("bot_name") or row.get("bot_username") or key).strip()
-                checked = "✅" if key in selected else "☑️"
-                buttons.append(self._btn(f"{checked} {label}", callback_data=f"force_sub_apply_toggle:{key}", style="primary"))
-            buttons.append(self._btn(self._tr(user_id, "✅ تم", "✅ Done"), callback_data="force_sub_apply_done", style="success"))
-            kb = self._pattern_rows(buttons, back_callback="force_sub_menu", back_text=self._tr(user_id, "رجوع", "Back"))
-            self.edit_text(chat_id, message_id, self._tr(user_id, "اختر البوتات المطبق عليها الاشتراك.", "Select bots where force sub applies."), kb)
-            return
-
-        if data.startswith("force_sub_apply_toggle:"):
-            if not self.has_full_vars_access(user_id):
-                self.answer_callback(callback_id, self._tr(user_id, "غير متاح.", "Not allowed."))
-                return
-            key = data.split(":", 1)[1].strip()
-            fs = self.get_forced_sub_config()
-            selected = {str(x).strip() for x in (fs.get("apply_to") or []) if str(x).strip()}
-            if key in selected:
-                selected.remove(key)
-            else:
-                selected.add(key)
-            fs["apply_to"] = sorted(selected)
-            self.save_forced_sub_config(fs)
-            self.answer_callback(callback_id, self._tr(user_id, "تم.", "Done."))
-            fs2 = self.get_forced_sub_config()
-            selected2 = {str(x).strip() for x in (fs2.get("apply_to") or []) if str(x).strip()}
-            buttons = []
-            main_checked = "✅" if "main" in selected2 else "☑️"
-            buttons.append(self._btn(f"{main_checked} MAIN", callback_data="force_sub_apply_toggle:main", style="primary"))
-            rows2 = self.load_managed_bots()
-            for row2 in rows2:
-                bid2 = str(row2.get("id") or "").strip()
-                if not bid2:
-                    continue
-                k2 = f"managed:{bid2}"
-                label2 = str(row2.get("bot_name") or row2.get("bot_username") or k2).strip()
-                checked2 = "✅" if k2 in selected2 else "☑️"
-                buttons.append(self._btn(f"{checked2} {label2}", callback_data=f"force_sub_apply_toggle:{k2}", style="primary"))
-            buttons.append(self._btn(self._tr(user_id, "✅ تم", "✅ Done"), callback_data="force_sub_apply_done", style="success"))
-            kb2 = self._pattern_rows(buttons, back_callback="force_sub_menu", back_text=self._tr(user_id, "رجوع", "Back"))
-            self.edit_text(chat_id, message_id, self._tr(user_id, "اختر البوتات المطبق عليها الاشتراك.", "Select bots where force sub applies."), kb2)
-            return
-
-        if data == "force_sub_apply_done":
-            if not self.has_full_vars_access(user_id):
-                self.answer_callback(callback_id, self._tr(user_id, "غير متاح.", "Not allowed."))
-                return
-            self.mark_runtime_change()
-            self.edit_text(chat_id, message_id, self._tr(user_id, "تم حفظ البوتات المطبقة.", "Applied bots saved."), self.kb_force_sub_menu(user_id))
             return
 
         if data == "var_admins_menu":
@@ -3981,12 +3664,6 @@ class PanelBot:
         if not self.is_admin(user_id):
             return
 
-        if self.is_forced_sub_required_here():
-            ok_sub, _missing = self.check_user_subscribed(user_id)
-            if not ok_sub:
-                self.force_sub_prompt(user_id, chat_id)
-                return
-
         if text in ("/start", "start", "menu", "/menu"):
             self.clear_state(user_id)
             if self.is_start_date_prompt_pending():
@@ -4134,32 +3811,6 @@ class PanelBot:
             self.clear_state(user_id)
             self.send_text(chat_id, self._tr(user_id, "جاري الإذاعة...", "Broadcast in progress..."))
             self._run_async(self.run_broadcast, user_id, chat_id, msg_text, b_text, url)
-            return
-
-        if mode == "wait_force_sub_channel":
-            if not self.has_full_vars_access(user_id):
-                self.clear_state(user_id)
-                self.send_text(chat_id, self._tr(user_id, "غير متاح.", "Not allowed."))
-                return
-            parts = [x.strip() for x in text.split(",", 1)]
-            if len(parts) < 2:
-                self.send_text(chat_id, self._tr(user_id, "صيغة غير صحيحة.", "Invalid format."))
-                return
-            name = parts[0]
-            raw_target = parts[1]
-            chat_target = self.normalize_group_target(raw_target)
-            if not chat_target:
-                self.send_text(chat_id, self._tr(user_id, "قيمة القناة غير صحيحة.", "Invalid channel target."))
-                return
-            fs = self.get_forced_sub_config()
-            channels = fs.get("channels") if isinstance(fs.get("channels"), list) else []
-            channels = [x for x in channels if str((x or {}).get("chat_id") or "").strip() != chat_target]
-            channels.append({"name": name, "chat_id": chat_target})
-            fs["channels"] = channels
-            self.save_forced_sub_config(fs)
-            self.clear_state(user_id)
-            self.mark_runtime_change()
-            self.send_text(chat_id, self._tr(user_id, "تمت إضافة القناة للاشتراك الإجباري.", "Channel added to forced subscription."), self.kb_force_sub_menu(user_id))
             return
 
         if mode == "wait_new_bot_name":

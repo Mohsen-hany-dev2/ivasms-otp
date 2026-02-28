@@ -3,6 +3,7 @@ import os
 import re
 import sqlite3
 import time
+import threading
 import hashlib
 from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict
@@ -112,6 +113,10 @@ class PanelBot:
         self.user_numbers_view_account: dict[int, str | None] = {}
         self.user_view_rev: dict[int, int] = {}
         self.user_lang: dict[int, str] = {}
+        self.op_lock = threading.Lock()
+        self.operations: dict[str, dict[str, Any]] = {}
+        self.user_active_operation: dict[int, str] = {}
+        self.op_seq = 0
 
         if not self.bot_token:
             raise RuntimeError("TELEGRAM_BOT_TOKEN is missing in .env")
@@ -1331,6 +1336,159 @@ class PanelBot:
                 out.append(new_row)
         return out
 
+    # -------------------------- operation progress --------------------------
+    def _new_operation_id(self) -> str:
+        with self.op_lock:
+            self.op_seq += 1
+            return f"op_{int(time.time())}_{self.op_seq}"
+
+    def _operation_text(self, op: dict[str, Any], user_id: int) -> str:
+        title = self._q(self._tr(user_id, "༺═════⇓ التقدم ⇓═════༻", "༺═════⇓ Progress ⇓═════༻"))
+        op_name = str(op.get("name") or "-")
+        target = str(op.get("target") or "-")
+        total = max(0, int(op.get("total", 0) or 0))
+        done = max(0, int(op.get("done", 0) or 0))
+        remaining = max(0, total - done)
+        status = str(op.get("status") or "running")
+        status_label = {
+            "running": self._tr(user_id, "جاري التنفيذ", "Running"),
+            "cancelled": self._tr(user_id, "تم الإلغاء", "Cancelled"),
+            "completed": self._tr(user_id, "مكتمل", "Completed"),
+            "failed": self._tr(user_id, "فشل", "Failed"),
+        }.get(status, status)
+        lines = [
+            title,
+            self._tr(user_id, f"العملية: {op_name}", f"Operation: {op_name}"),
+            self._tr(user_id, f"هدف المهمة: {target}", f"Target: {target}"),
+            self._tr(user_id, f"التقدم: {done}/{total}", f"Progress: {done}/{total}"),
+            self._tr(user_id, f"المتبقي: {remaining}", f"Remaining: {remaining}"),
+            self._tr(user_id, f"الحالة: {status_label}", f"Status: {status_label}"),
+        ]
+        note = str(op.get("note") or "").strip()
+        if note:
+            lines.append(note)
+        return "\n".join(lines)
+
+    def _operation_keyboard(self, op_id: str, user_id: int, running: bool) -> list[list[dict[str, Any]]]:
+        if running:
+            return [[self._btn(self._tr(user_id, "🛑 الغاء العملية", "🛑 Cancel Operation"), callback_data=f"op_cancel:{op_id}", style="danger")]]
+        return [[self._btn(self._tr(user_id, "رجوع", "Back"), callback_data="main_menu", style="primary")]]
+
+    def _send_progress_message(self, chat_id: int | str, text: str, keyboard: list[list[dict[str, Any]]]) -> int:
+        body: dict[str, Any] = {
+            "chat_id": chat_id,
+            "text": self._format_text(text),
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+            "reply_markup": {"inline_keyboard": keyboard},
+        }
+        res = self.tg_api("sendMessage", body)
+        if isinstance(res, dict) and res.get("ok"):
+            result = res.get("result") or {}
+            try:
+                return int(result.get("message_id") or 0)
+            except Exception:
+                return 0
+        self.send_text(chat_id, text, keyboard)
+        return 0
+
+    def _create_operation(self, user_id: int, chat_id: int | str, name: str, target: str, total: int) -> str:
+        op_id = self._new_operation_id()
+        op: dict[str, Any] = {
+            "id": op_id,
+            "user_id": int(user_id),
+            "chat_id": chat_id,
+            "name": str(name),
+            "target": str(target),
+            "total": max(0, int(total or 0)),
+            "done": 0,
+            "status": "running",
+            "cancelled": False,
+            "note": "",
+            "message_id": 0,
+            "last_render_at": 0.0,
+        }
+        with self.op_lock:
+            self.operations[op_id] = op
+            self.user_active_operation[int(user_id)] = op_id
+        msg_id = self._send_progress_message(chat_id, self._operation_text(op, user_id), self._operation_keyboard(op_id, user_id, True))
+        with self.op_lock:
+            if op_id in self.operations:
+                self.operations[op_id]["message_id"] = msg_id
+        return op_id
+
+    def _update_operation(
+        self,
+        op_id: str,
+        *,
+        done: int | None = None,
+        total: int | None = None,
+        status: str | None = None,
+        note: str | None = None,
+        force_render: bool = False,
+    ) -> None:
+        with self.op_lock:
+            op = self.operations.get(op_id)
+            if not isinstance(op, dict):
+                return
+            if done is not None:
+                op["done"] = max(0, int(done))
+            if total is not None:
+                op["total"] = max(0, int(total))
+            if status:
+                op["status"] = str(status)
+            if note is not None:
+                op["note"] = str(note)
+            now = time.time()
+            last = float(op.get("last_render_at") or 0.0)
+            should_render = force_render or (now - last >= 1.0)
+            if should_render:
+                op["last_render_at"] = now
+            op_copy = dict(op)
+        if not should_render:
+            return
+        chat_id = op_copy.get("chat_id")
+        message_id = int(op_copy.get("message_id") or 0)
+        uid = int(op_copy.get("user_id") or 0)
+        running = str(op_copy.get("status") or "") == "running"
+        text = self._operation_text(op_copy, uid)
+        kb = self._operation_keyboard(op_id, uid, running)
+        if message_id > 0:
+            self.edit_text(chat_id, message_id, text, kb)
+        else:
+            self._send_progress_message(chat_id, text, kb)
+
+    def _finish_operation(self, op_id: str, status: str, note: str = "") -> None:
+        with self.op_lock:
+            op = self.operations.get(op_id)
+            if not isinstance(op, dict):
+                return
+            uid = int(op.get("user_id") or 0)
+            if self.user_active_operation.get(uid) == op_id:
+                self.user_active_operation.pop(uid, None)
+        self._update_operation(op_id, status=status, note=note, force_render=True)
+
+    def _cancel_operation(self, op_id: str, user_id: int) -> bool:
+        with self.op_lock:
+            op = self.operations.get(op_id)
+            if not isinstance(op, dict):
+                return False
+            if int(op.get("user_id") or 0) != int(user_id):
+                return False
+            if str(op.get("status") or "") != "running":
+                return False
+            op["cancelled"] = True
+            op["note"] = self._tr(user_id, "تم طلب الإلغاء... انتظر إيقاف العملية.", "Cancellation requested... stopping operation.")
+        self._update_operation(op_id, force_render=True)
+        return True
+
+    def _is_operation_cancelled(self, op_id: str) -> bool:
+        with self.op_lock:
+            op = self.operations.get(op_id)
+            if not isinstance(op, dict):
+                return False
+            return bool(op.get("cancelled", False))
+
     def kb_numbers_scope(self, user_id: int) -> list[list[dict[str, Any]]]:
         buttons = [
             self._btn(self._tr(user_id, "📋 عرض جميع الأرقام", "📋 Show All Numbers"), callback_data="numbers_show_all", style="primary"),
@@ -1915,6 +2073,7 @@ class PanelBot:
         count: int,
         account_name: str | None = None,
         account_names: list[str] | None = None,
+        operation_id: str | None = None,
     ) -> str:
         range_name = str(range_name or "").strip()
         if not range_name:
@@ -1962,6 +2121,7 @@ class PanelBot:
             calls_by_account[name] = int(calls_by_account.get(name, 0)) + 1
         summary: list[str] = []
         total_success = 0
+        cancelled = False
 
         for name, token in targets:
             success_calls = 0
@@ -1970,6 +2130,9 @@ class PanelBot:
             if account_calls <= 0:
                 continue
             for _idx in range(1, account_calls + 1):
+                if operation_id and self._is_operation_cancelled(operation_id):
+                    cancelled = True
+                    break
                 ok, _payload, req_err = self.api_post("/api/v1/order/range", {"token": token, "range_name": range_name}, timeout=90)
                 if ok:
                     success_calls += 1
@@ -1989,6 +2152,8 @@ class PanelBot:
                 row["last_requested_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 accounts[name] = row
                 total_success += requested_numbers
+                if operation_id:
+                    self._update_operation(operation_id, done=total_success)
 
             expected_for_account = account_calls * 50
             if success_calls == account_calls:
@@ -1998,6 +2163,9 @@ class PanelBot:
                     self._tr(user_id, f"{name}: نجاح جزئي {requested_numbers}/{expected_for_account}", f"{name}: partial success {requested_numbers}/{expected_for_account}")
                     + (self._tr(user_id, f" | خطأ: {last_err}", f" | error: {last_err}") if last_err else "")
                 )
+            if cancelled:
+                summary.append(self._tr(user_id, "تم إيقاف العملية بطلب منك.", "Operation stopped by your request."))
+                break
 
         self.save_ranges_store(store)
         live_rows_after = self.fetch_numbers()
@@ -2021,7 +2189,7 @@ class PanelBot:
             ]
         )
 
-    def delete_numbers(self, user_id: int, items: list[str]) -> str:
+    def delete_numbers(self, user_id: int, items: list[str], operation_id: str | None = None) -> str:
         cleaned = [x.strip() for x in items if str(x).strip()]
         if not cleaned:
             return self._tr(user_id, "لم يتم العثور على أرقام/IDs صالحة للحذف.", "No valid numbers/IDs found to delete.")
@@ -2075,6 +2243,8 @@ class PanelBot:
             if unresolved:
                 return self._tr(user_id, "لم يتم العثور على IDs للأرقام المدخلة.", "No IDs found for provided numbers.") + "\n" + "\n".join(f"- {x}" for x in unresolved[:25])
             return self._tr(user_id, "لم يتم استخراج IDs صالحة للحذف.", "Could not extract valid IDs for deletion.")
+        if operation_id:
+            self._update_operation(operation_id, total=len(unique_ids), done=0)
 
         # Group IDs by owning account so deletion goes to correct account.
         by_account: dict[str, list[str]] = {}
@@ -2085,10 +2255,15 @@ class PanelBot:
 
         total_ok_accounts = 0
         total_removed_ids = 0
+        processed_ids = 0
         details: list[str] = []
         last_err = ""
+        cancelled = False
 
         for name, token in targets:
+            if operation_id and self._is_operation_cancelled(operation_id):
+                cancelled = True
+                break
             account_ids = by_account.get(name, []) + by_account.get("__ALL__", [])
             # unique per account
             dedup_ids: list[str] = []
@@ -2111,13 +2286,21 @@ class PanelBot:
                     {"token": token, "number_id": rid},
                     {"token": token, "id": rid},
                 ):
+                    if operation_id and self._is_operation_cancelled(operation_id):
+                        cancelled = True
+                        break
                     ok, _payload, err = self.api_post("/api/v1/numbers/remove", body, timeout=90)
                     if ok:
                         single_ok = True
                         break
                     single_err = err
+                if cancelled:
+                    break
                 if single_ok:
                     account_removed = 1
+                    processed_ids += 1
+                    if operation_id:
+                        self._update_operation(operation_id, done=processed_ids)
                 else:
                     last_err = f"{name}: {single_err}"
             else:
@@ -2146,9 +2329,15 @@ class PanelBot:
                                     pass
                                 break
                     account_removed = max(0, removed)
+                    processed_ids += account_removed
+                    if operation_id:
+                        self._update_operation(operation_id, done=processed_ids)
                 else:
                     # Fallback to single remove when bulk fails.
                     for rid in dedup_ids:
+                        if operation_id and self._is_operation_cancelled(operation_id):
+                            cancelled = True
+                            break
                         one_ok = False
                         one_err = ""
                         for body_one in (
@@ -2166,8 +2355,13 @@ class PanelBot:
                             one_err = err_one
                         if one_ok:
                             account_removed += 1
+                            processed_ids += 1
+                            if operation_id:
+                                self._update_operation(operation_id, done=processed_ids)
                         else:
                             last_err = f"{name}: {one_err or bulk_err}"
+                    if cancelled:
+                        break
 
             if account_removed > 0:
                 total_ok_accounts += 1
@@ -2175,11 +2369,15 @@ class PanelBot:
                 details.append(f"{name}: removed={account_removed}")
             else:
                 details.append(f"{name}: failed")
+            if cancelled:
+                break
 
         unresolved_text = ""
         if unresolved:
             unresolved_text = "\n" + self._tr(user_id, "لم يتم العثور على IDs لهذه القيم:", "No IDs found for these values:") + "\n" + "\n".join(f"- {x}" for x in unresolved[:25])
 
+        if cancelled:
+            return self._tr(user_id, "تم إلغاء العملية.", "Operation cancelled.") + "\n" + "\n".join(details) + "\n" + self._tr(user_id, f"إجمالي المحذوف: {total_removed_ids}", f"Total deleted: {total_removed_ids}") + unresolved_text
         if total_removed_ids > 0:
             return self._tr(user_id, "تم الحذف بنجاح.", "Deletion completed successfully.") + "\n" + "\n".join(details) + "\n" + self._tr(user_id, f"إجمالي المحذوف: {total_removed_ids}", f"Total deleted: {total_removed_ids}") + unresolved_text
         return self._tr(user_id, f"فشل حذف الأرقام. آخر خطأ: {last_err or 'unknown'}", f"Failed to delete numbers. Last error: {last_err or 'unknown'}") + unresolved_text
@@ -2730,15 +2928,26 @@ class PanelBot:
         account_name: str | None = None,
         account_names: list[str] | None = None,
     ) -> None:
+        op_name = self._tr(user_id, "إضافة أرقام", "Add Numbers")
+        op_target = self._tr(user_id, f"إضافة رينج ({range_name})", f"Add range ({range_name})")
+        op_id = self._create_operation(user_id, chat_id, op_name, op_target, max(0, int(count or 0)))
         try:
-            result = self.request_numbers_for_range(user_id, range_name, count, account_name, account_names)
+            result = self.request_numbers_for_range(user_id, range_name, count, account_name, account_names, op_id)
+            status = "cancelled" if self._is_operation_cancelled(op_id) else "completed"
+            self._finish_operation(op_id, status)
         except Exception as exc:
             result = self._tr(user_id, f"فشل تنفيذ الطلب: {exc}", f"Request failed: {exc}")
+            self._finish_operation(op_id, "failed", result)
         self.send_text(chat_id, result)
         self.show_main(chat_id, user_id)
 
     def _process_delete_request(self, chat_id: int | str, user_id: int, items: list[str]) -> None:
-        result = self.delete_numbers(user_id, items)
+        op_name = self._tr(user_id, "حذف أرقام", "Delete Numbers")
+        op_target = self._tr(user_id, "حذف العناصر المحددة", "Delete selected entries")
+        op_id = self._create_operation(user_id, chat_id, op_name, op_target, max(0, len(items)))
+        result = self.delete_numbers(user_id, items, op_id)
+        status = "cancelled" if self._is_operation_cancelled(op_id) else "completed"
+        self._finish_operation(op_id, status)
         self.send_text(chat_id, result)
         self.show_main(chat_id, user_id)
 
@@ -2757,7 +2966,12 @@ class PanelBot:
             self.send_text(chat_id, self._tr(user_id, "لا توجد أرقام للحذف.", "No numbers to delete."))
             self.show_main(chat_id, user_id)
             return
-        result = self.delete_numbers(user_id, ids)
+        op_name = self._tr(user_id, "حذف أرقام", "Delete Numbers")
+        op_target = self._tr(user_id, "حذف كل الأرقام", "Delete all numbers")
+        op_id = self._create_operation(user_id, chat_id, op_name, op_target, max(0, len(ids)))
+        result = self.delete_numbers(user_id, ids, op_id)
+        status = "cancelled" if self._is_operation_cancelled(op_id) else "completed"
+        self._finish_operation(op_id, status)
         self.send_text(chat_id, result)
         self.show_main(chat_id, user_id)
 
@@ -2797,6 +3011,14 @@ class PanelBot:
         self.answer_callback(callback_id)
 
         if data == "noop":
+            return
+        if data.startswith("op_cancel:"):
+            op_id = data.split(":", 1)[1].strip()
+            ok = self._cancel_operation(op_id, user_id)
+            if ok:
+                self.answer_callback(callback_id, self._tr(user_id, "تم طلب إلغاء العملية.", "Cancellation requested."))
+            else:
+                self.answer_callback(callback_id, self._tr(user_id, "لا يمكن إلغاء هذه العملية.", "Cannot cancel this operation."))
             return
         if data == "main_menu":
             self.clear_state(user_id)

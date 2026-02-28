@@ -3641,9 +3641,12 @@ class PanelBot:
                 if not isinstance(entry, dict):
                     continue
                 existing = self._range_existing_count(str(rname), account_names=selected, numbers_rows=live_rows)
+                if existing <= 0:
+                    # Hide empty ranges from remaining-limits view.
+                    continue
                 rem = self._range_remaining(str(rname), account_names=selected, numbers_rows=live_rows)
                 hint_rows.append(self._tr(user_id, f"- {rname} | الموجود: {existing} | المتبقي: {rem}", f"- {rname} | existing: {existing} | remaining: {rem}"))
-            hint = "\n".join(hint_rows) if hint_rows else self._tr(user_id, "لا توجد رينجات محفوظة بعد.", "No saved ranges yet.")
+            hint = "\n".join(hint_rows) if hint_rows else self._tr(user_id, "لا توجد رينجات تحتوي أرقام الآن.", "No ranges with numbers right now.")
             self.set_state(user_id, "wait_range_name", {"accounts": selected, "mode": "multi"})
             self.send_text(
                 chat_id,
@@ -3677,9 +3680,12 @@ class PanelBot:
                 if not isinstance(entry, dict):
                     continue
                 existing = self._range_existing_count(str(rname), account_name, numbers_rows=live_rows)
+                if existing <= 0:
+                    # Hide empty ranges from remaining-limits view.
+                    continue
                 rem = self._range_remaining(str(rname), account_name, numbers_rows=live_rows)
                 hint_rows.append(self._tr(user_id, f"- {rname} | الموجود: {existing} | المتبقي: {rem}", f"- {rname} | existing: {existing} | remaining: {rem}"))
-            hint = "\n".join(hint_rows) if hint_rows else self._tr(user_id, "لا توجد رينجات محفوظة بعد.", "No saved ranges yet.")
+            hint = "\n".join(hint_rows) if hint_rows else self._tr(user_id, "لا توجد رينجات تحتوي أرقام الآن.", "No ranges with numbers right now.")
             self.set_state(user_id, "wait_range_name", {"account": account_name, "mode": "normal"})
             self.send_text(
                 chat_id,

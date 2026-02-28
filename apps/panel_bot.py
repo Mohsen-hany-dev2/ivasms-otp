@@ -117,6 +117,10 @@ class PanelBot:
         self.operations: dict[str, dict[str, Any]] = {}
         self.user_active_operation: dict[int, str] = {}
         self.op_seq = 0
+        self.op_tick_interval_sec = 3.0
+        self.op_stop_event = threading.Event()
+        self.op_ticker_thread = threading.Thread(target=self._operations_ticker_loop, daemon=True)
+        self.op_ticker_thread.start()
 
         if not self.bot_token:
             raise RuntimeError("TELEGRAM_BOT_TOKEN is missing in .env")
@@ -1073,6 +1077,11 @@ class PanelBot:
             payload["show_alert"] = False
         self.tg_api("answerCallbackQuery", payload)
 
+    def delete_message(self, chat_id: int | str, message_id: int) -> None:
+        if not message_id:
+            return
+        self.tg_api("deleteMessage", {"chat_id": chat_id, "message_id": int(message_id)})
+
     def send_document(self, chat_id: int | str, file_path: Path, caption: str = "") -> None:
         url = f"https://api.telegram.org/bot{self.bot_token}/sendDocument"
         try:
@@ -1349,6 +1358,10 @@ class PanelBot:
         total = max(0, int(op.get("total", 0) or 0))
         done = max(0, int(op.get("done", 0) or 0))
         remaining = max(0, total - done)
+        started_at = float(op.get("started_at", 0.0) or 0.0)
+        elapsed = max(0, int(time.time() - started_at)) if started_at > 0 else 0
+        mm = elapsed // 60
+        ss = elapsed % 60
         status = str(op.get("status") or "running")
         status_label = {
             "running": self._tr(user_id, "جاري التنفيذ", "Running"),
@@ -1362,6 +1375,7 @@ class PanelBot:
             self._tr(user_id, f"هدف المهمة: {target}", f"Target: {target}"),
             self._tr(user_id, f"التقدم: {done}/{total}", f"Progress: {done}/{total}"),
             self._tr(user_id, f"المتبقي: {remaining}", f"Remaining: {remaining}"),
+            self._tr(user_id, f"المدة: {mm:02d}:{ss:02d}", f"Elapsed: {mm:02d}:{ss:02d}"),
             self._tr(user_id, f"الحالة: {status_label}", f"Status: {status_label}"),
         ]
         note = str(op.get("note") or "").strip()
@@ -1407,6 +1421,7 @@ class PanelBot:
             "note": "",
             "message_id": 0,
             "last_render_at": 0.0,
+            "started_at": time.time(),
         }
         with self.op_lock:
             self.operations[op_id] = op
@@ -1488,6 +1503,59 @@ class PanelBot:
             if not isinstance(op, dict):
                 return False
             return bool(op.get("cancelled", False))
+
+    def _get_operation_done(self, op_id: str) -> int:
+        with self.op_lock:
+            op = self.operations.get(op_id)
+            if not isinstance(op, dict):
+                return 0
+            try:
+                return max(0, int(op.get("done", 0) or 0))
+            except Exception:
+                return 0
+
+    def _operations_ticker_loop(self) -> None:
+        while not self.op_stop_event.wait(self.op_tick_interval_sec):
+            running_ids: list[str] = []
+            with self.op_lock:
+                for op_id, op in self.operations.items():
+                    if not isinstance(op, dict):
+                        continue
+                    if str(op.get("status") or "") == "running":
+                        running_ids.append(op_id)
+            for op_id in running_ids:
+                self._update_operation(op_id, force_render=True)
+
+    def _list_user_operations(self, user_id: int, limit: int = 20) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        with self.op_lock:
+            for op in self.operations.values():
+                if not isinstance(op, dict):
+                    continue
+                if int(op.get("user_id") or 0) != int(user_id):
+                    continue
+                rows.append(dict(op))
+        rows.sort(key=lambda x: float(x.get("started_at", 0.0) or 0.0), reverse=True)
+        return rows[: max(1, int(limit or 20))]
+
+    def _show_operations_menu(self, chat_id: int | str, message_id: int, user_id: int) -> None:
+        rows = self._list_user_operations(user_id, limit=25)
+        lines = [self._q(self._tr(user_id, "༺═════⇓ عملياتي ⇓═════༻", "༺═════⇓ My Operations ⇓═════༻"))]
+        buttons: list[dict[str, Any]] = []
+        if not rows:
+            lines.append(self._tr(user_id, "لا توجد عمليات حالياً.", "No operations yet."))
+        else:
+            lines.append(self._tr(user_id, "اختر عملية لعرض التقدم.", "Choose an operation to view progress."))
+            for op in rows:
+                op_id = str(op.get("id") or "")
+                status = str(op.get("status") or "running")
+                marker = "🟢" if status == "running" else ("🟠" if status == "cancelled" else ("✅" if status == "completed" else "🔴"))
+                name = str(op.get("name") or "-")
+                done = int(op.get("done", 0) or 0)
+                total = int(op.get("total", 0) or 0)
+                buttons.append(self._btn(f"{marker} {name} {done}/{total}", callback_data=f"op_show:{op_id}", style="primary"))
+        kb = self._pattern_rows(buttons, back_callback="main_menu", back_text=self._tr(user_id, "رجوع", "Back"))
+        self.edit_text(chat_id, message_id, "\n".join(lines), kb)
 
     def kb_numbers_scope(self, user_id: int) -> list[list[dict[str, Any]]]:
         buttons = [
@@ -1691,6 +1759,32 @@ class PanelBot:
             out.append(part)
         return out
 
+    def _parse_bulk_range_requests(self, raw: str) -> tuple[list[tuple[str, int]], list[str]]:
+        lines = [ln.strip() for ln in str(raw or "").splitlines() if ln.strip()]
+        parsed: list[tuple[str, int]] = []
+        bad: list[str] = []
+        for line in lines:
+            part = line.lstrip("-•* ").strip()
+            part = re.sub(r"^\d+\.\s*", "", part).strip()
+            if ":" not in part:
+                bad.append(line)
+                continue
+            left, right = part.rsplit(":", 1)
+            rname = str(left or "").strip()
+            if not rname:
+                bad.append(line)
+                continue
+            try:
+                count = int(str(right).strip())
+            except Exception:
+                bad.append(line)
+                continue
+            if count < 50 or count > 1000 or (count % 50 != 0):
+                bad.append(line)
+                continue
+            parsed.append((rname, count))
+        return parsed, bad
+
     def sync_ranges_store_from_numbers(self, rows: list[dict[str, str]]) -> None:
         grouped: dict[str, int] = defaultdict(int)
         for row in rows:
@@ -1721,6 +1815,7 @@ class PanelBot:
             self._btn(toggle_label, callback_data="toggle_fetch", style="success" if enabled else "danger"),
             self._btn(self._tr(user_id, "⚙️ الإعدادات", "⚙️ Settings"), callback_data="vars_menu", style="primary"),
             self._btn(self._tr(user_id, "💬 الرسائل", "💬 Messages"), callback_data="messages_menu", style="primary"),
+            self._btn(self._tr(user_id, "📌 عملياتي", "📌 My Operations"), callback_data="ops_menu", style="primary"),
             self._btn(self._tr(user_id, "🌐 اللغة", "🌐 Language"), callback_data="lang_menu", style="primary"),
             self._btn(self._tr(user_id, "📊 الترافيك", "📊 Traffic"), callback_data="traffic_menu", style="primary"),
             self._btn(self._tr(user_id, "🧩 المنصات المتاحة", "🧩 Platforms"), callback_data="show_platforms", style="primary"),
@@ -2074,6 +2169,7 @@ class PanelBot:
         account_name: str | None = None,
         account_names: list[str] | None = None,
         operation_id: str | None = None,
+        progress_base: int = 0,
     ) -> str:
         range_name = str(range_name or "").strip()
         if not range_name:
@@ -2153,7 +2249,7 @@ class PanelBot:
                 accounts[name] = row
                 total_success += requested_numbers
                 if operation_id:
-                    self._update_operation(operation_id, done=total_success)
+                    self._update_operation(operation_id, done=max(0, int(progress_base)) + total_success)
 
             expected_for_account = account_calls * 50
             if success_calls == account_calls:
@@ -2941,6 +3037,45 @@ class PanelBot:
         self.send_text(chat_id, result)
         self.show_main(chat_id, user_id)
 
+    def _process_multi_range_request(
+        self,
+        chat_id: int | str,
+        user_id: int,
+        requests_rows: list[tuple[str, int]],
+        account_name: str | None = None,
+        account_names: list[str] | None = None,
+    ) -> None:
+        total_target = sum(max(0, int(c)) for _r, c in requests_rows)
+        op_name = self._tr(user_id, "إضافة أرقام", "Add Numbers")
+        op_target = self._tr(user_id, "إضافة عدة رينجات", "Add multiple ranges")
+        op_id = self._create_operation(user_id, chat_id, op_name, op_target, total_target)
+        results: list[str] = []
+        try:
+            for rname, count in requests_rows:
+                if self._is_operation_cancelled(op_id):
+                    break
+                base = self._get_operation_done(op_id)
+                result = self.request_numbers_for_range(
+                    user_id,
+                    rname,
+                    count,
+                    account_name,
+                    account_names,
+                    operation_id=op_id,
+                    progress_base=base,
+                )
+                results.append(result)
+            status = "cancelled" if self._is_operation_cancelled(op_id) else "completed"
+            self._finish_operation(op_id, status)
+        except Exception as exc:
+            err_msg = self._tr(user_id, f"فشل تنفيذ الطلبات المتعددة: {exc}", f"Failed to process bulk requests: {exc}")
+            results.append(err_msg)
+            self._finish_operation(op_id, "failed", err_msg)
+        if results:
+            sep = "\n\n" + ("-" * 20) + "\n\n"
+            self.send_text(chat_id, sep.join(results))
+        self.show_main(chat_id, user_id)
+
     def _process_delete_request(self, chat_id: int | str, user_id: int, items: list[str]) -> None:
         op_name = self._tr(user_id, "حذف أرقام", "Delete Numbers")
         op_target = self._tr(user_id, "حذف العناصر المحددة", "Delete selected entries")
@@ -3011,6 +3146,20 @@ class PanelBot:
         self.answer_callback(callback_id)
 
         if data == "noop":
+            return
+        if data == "ops_menu":
+            self._show_operations_menu(chat_id, message_id, user_id)
+            return
+        if data.startswith("op_show:"):
+            op_id = data.split(":", 1)[1].strip()
+            with self.op_lock:
+                op = self.operations.get(op_id)
+                op_copy = dict(op) if isinstance(op, dict) else None
+            if not isinstance(op_copy, dict) or int(op_copy.get("user_id") or 0) != int(user_id):
+                self.answer_callback(callback_id, self._tr(user_id, "العملية غير موجودة.", "Operation not found."))
+                return
+            running = str(op_copy.get("status") or "") == "running"
+            self.edit_text(chat_id, message_id, self._operation_text(op_copy, user_id), self._operation_keyboard(op_id, user_id, running))
             return
         if data.startswith("op_cancel:"):
             op_id = data.split(":", 1)[1].strip()
@@ -4216,7 +4365,6 @@ class PanelBot:
             return
 
         if data == "numbers_delete_all_yes":
-            self.send_text(chat_id, self._tr(user_id, "جاري حذف كل الأرقام...", "Deleting all numbers..."))
             self._run_async(self._process_delete_all_numbers, chat_id, user_id)
             return
 
@@ -4433,6 +4581,7 @@ class PanelBot:
         from_user = msg.get("from") or {}
         chat_id = int(chat.get("id") or 0)
         user_id = int(from_user.get("id") or 0)
+        message_id = int(msg.get("message_id") or 0)
         self._set_user_lang(user_id, from_user.get("language_code"))
         self.refresh_runtime_settings()
         text = str(msg.get("text") or "").strip()
@@ -4493,6 +4642,8 @@ class PanelBot:
 
         mode = state.get("mode")
         data = state.get("data") or {}
+        if mode in {"wait_range_name", "wait_range_count", "wait_delete_numbers", "wait_ranges_bulk_add"} and message_id:
+            self.delete_message(chat_id, message_id)
 
         if mode == "wait_start_date":
             if not self.set_runtime_start_date(text):
@@ -4907,6 +5058,24 @@ class PanelBot:
             return
 
         if mode == "wait_range_name":
+            if ":" in text and len([ln for ln in text.splitlines() if ln.strip()]) >= 1:
+                bulk_rows, bad_rows = self._parse_bulk_range_requests(text)
+                if bulk_rows and not bad_rows:
+                    account_name = str(data.get("account") or "").strip()
+                    account_names = [str(x) for x in (data.get("accounts") or []) if str(x).strip()]
+                    self.clear_state(user_id)
+                    self._run_async(self._process_multi_range_request, chat_id, user_id, bulk_rows, account_name or None, account_names or None)
+                    return
+                if bad_rows and not bulk_rows:
+                    self.send_text(
+                        chat_id,
+                        self._tr(
+                            user_id,
+                            "صيغة الطلب المتعدد غير صحيحة.\nاستخدم لكل سطر: اسم الرينج:العدد\nمثال: EGYPT 4976:1000",
+                            "Invalid bulk format.\nUse per line: range_name:count\nExample: EGYPT 4976:1000",
+                        ),
+                    )
+                    return
             candidates = self._parse_range_input_candidates(text)
             if not candidates:
                 self.send_text(chat_id, self._tr(user_id, "اسم الرينج غير صالح، اكتب اسم رينج واحد.", "Invalid range name, send one range name."))
@@ -4969,14 +5138,12 @@ class PanelBot:
                 return
             count = int(text)
             self.clear_state(user_id)
-            self.send_text(chat_id, self._tr(user_id, "جاري تنفيذ طلب الأرقام...", "Processing number request..."))
             self._run_async(self._process_range_request, chat_id, user_id, range_name, count, account_name or None, account_names or None)
             return
 
         if mode == "wait_delete_numbers":
             items = self.parse_delete_items(text)
             self.clear_state(user_id)
-            self.send_text(chat_id, self._tr(user_id, "جاري حذف الأرقام...", "Deleting numbers..."))
             self._run_async(self._process_delete_request, chat_id, user_id, items)
             return
 
@@ -4987,6 +5154,7 @@ class PanelBot:
         chat_type = str(chat.get("type") or "")
         from_user = msg.get("from") or {}
         chat_id = int(chat.get("id") or 0)
+        message_id = int(msg.get("message_id") or 0)
         user_id = int(from_user.get("id") or 0)
         self._set_user_lang(user_id, from_user.get("language_code"))
         self.refresh_runtime_settings()
@@ -4996,6 +5164,8 @@ class PanelBot:
             return
         state = self.get_state(user_id)
         mode = str((state or {}).get("mode") or "")
+        if mode == "wait_delete_numbers" and message_id:
+            self.delete_message(chat_id, message_id)
         if mode not in {"wait_delete_numbers", "wait_add_account"}:
             self.send_text(chat_id, self._tr(user_id, "الملف تم استلامه، لكن لا يوجد عملية قيد الانتظار.", "File received, but there is no pending operation."))
             return

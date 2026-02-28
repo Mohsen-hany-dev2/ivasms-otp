@@ -2200,6 +2200,7 @@ class PanelBot:
             account_name=account_name if account_name else None,
             account_names=selected_names if selected_names else None,
         )
+        last_live_done = 0
         remaining = max_total - existing_before
         if remaining <= 0:
             return self._tr(user_id, f"الرينج {range_name} وصل الحد الأقصى ({max_total}).", f"Range {range_name} reached max limit ({max_total}).")
@@ -2261,6 +2262,22 @@ class PanelBot:
                 total_success += requested_numbers
                 if operation_id:
                     self._update_operation(operation_id, done=max(0, int(progress_base)) + total_success)
+            elif operation_id:
+                # If API reports failure but site shows numbers, sync from live data to avoid stuck 0 progress.
+                try:
+                    live_rows = self.fetch_numbers()
+                    existing_now = self._range_existing_count(
+                        range_name,
+                        account_name=account_name if account_name else None,
+                        account_names=selected_names if selected_names else None,
+                        numbers_rows=live_rows,
+                    )
+                    live_done = max(0, existing_now - existing_before)
+                    if live_done > last_live_done:
+                        last_live_done = live_done
+                        self._update_operation(operation_id, done=max(0, int(progress_base)) + max(total_success, live_done))
+                except Exception:
+                    pass
 
             expected_for_account = account_calls * 50
             if success_calls == account_calls:
@@ -2284,6 +2301,8 @@ class PanelBot:
         )
         new_remaining = max(0, max_total - existing_after)
         actual_added = max(0, existing_after - existing_before)
+        if operation_id:
+            self._update_operation(operation_id, done=max(0, int(progress_base)) + max(total_success, actual_added), force_render=True)
 
         return "\n".join(
             [

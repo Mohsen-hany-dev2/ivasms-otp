@@ -46,7 +46,8 @@ LOG_FORMAT = "%(asctime)s | %(levelname)-7s | %(name)s | %(message)s"
 logger = logging.getLogger("numplus-bot")
 LOG_THROTTLE_SECONDS = 120
 DEFAULT_POLL_INTERVAL_SECONDS = 30
-DEFAULT_GROUP_SEND_INTERVAL_SECONDS = 1.2
+DEFAULT_GROUP_SEND_INTERVAL_SECONDS = 0.2
+DEFAULT_FETCH_TIMEOUT_SECONDS = 90
 _LAST_LOG_AT: dict[str, int] = {}
 
 
@@ -741,7 +742,12 @@ def api_login(api_base: str, email: str, password: str) -> str | None:
 def fetch_messages(api_base: str, api_token: str, start_date: str, limit: int) -> list[dict]:
     endpoint = f"{api_base}/api/v1/biring/code"
     try:
-        r = requests.post(endpoint, json={"token": api_token, "start_date": start_date}, timeout=600)
+        fetch_timeout = int(str(os.getenv("API_FETCH_TIMEOUT_SEC", str(DEFAULT_FETCH_TIMEOUT_SECONDS))).strip() or str(DEFAULT_FETCH_TIMEOUT_SECONDS))
+    except Exception:
+        fetch_timeout = DEFAULT_FETCH_TIMEOUT_SECONDS
+    fetch_timeout = max(15, min(300, fetch_timeout))
+    try:
+        r = requests.post(endpoint, json={"token": api_token, "start_date": start_date}, timeout=fetch_timeout)
     except requests.RequestException as exc:
         reason = _classify_request_error(exc)
         raise RuntimeError(f"request failed ({reason}): {exc}") from exc
@@ -970,11 +976,6 @@ def run_loop(start_date: str, api_base: str, api_token: str, tg_token: str, targ
                 gname = grp["name"]
                 if gid in invalid_groups:
                     continue
-                last_ts = last_group_send_at.get(gid, 0.0)
-                now_ts = time.monotonic()
-                wait = group_min_interval - (now_ts - last_ts)
-                if wait > 0:
-                    time.sleep(wait)
                 prev_msg_id_raw = prev_map.get(gid)
                 j: dict = {}
                 action = "send"
@@ -987,6 +988,12 @@ def run_loop(start_date: str, api_base: str, api_token: str, tg_token: str, targ
                         j = {}
 
                 if not j or not j.get("ok"):
+                    # Rate-limit only real send operations per group.
+                    last_ts = last_group_send_at.get(gid, 0.0)
+                    now_ts = time.monotonic()
+                    wait = group_min_interval - (now_ts - last_ts)
+                    if wait > 0:
+                        time.sleep(wait)
                     try:
                         j = send_telegram_message(tg_token, gid, text, code)
                         action = "send"

@@ -1223,12 +1223,12 @@ class PanelBot:
             btn["copy_text"] = {"text": copy_text}
         if "url" not in btn and "callback_data" not in btn and "copy_text" not in btn:
             btn["callback_data"] = "noop"
-        if style in {"danger", "success", "primary"}:
+        if style in {"danger", "success", "primary", "secondary"}:
             btn["style"] = style
         return btn
 
     def _sanitize_keyboard(self, keyboard: list[list[dict[str, Any]]]) -> list[list[dict[str, Any]]]:
-        allowed = {"text", "callback_data", "url", "copy_text"}
+        allowed = {"text", "callback_data", "url", "copy_text", "style"}
         out: list[list[dict[str, Any]]] = []
         for row in keyboard:
             new_row: list[dict[str, Any]] = []
@@ -1241,6 +1241,8 @@ class PanelBot:
                 # copy_text fallback safety
                 if "copy_text" in clean and not isinstance(clean.get("copy_text"), dict):
                     clean.pop("copy_text", None)
+                if "style" in clean and str(clean.get("style")) not in {"danger", "success", "primary", "secondary"}:
+                    clean.pop("style", None)
                 if "callback_data" not in clean and "url" not in clean and "copy_text" not in clean:
                     clean["callback_data"] = "noop"
                 new_row.append(clean)
@@ -1306,25 +1308,50 @@ class PanelBot:
         buttons.append(self._btn(self._tr(user_id, "✅ تم", "✅ Done"), callback_data="numbers_req_multi_done", style="success"))
         return self._pattern_rows(buttons, back_callback="numbers_request", back_text=self._tr(user_id, "رجوع", "Back"))
 
-    def _range_remaining(self, range_name: str, account_name: str | None = None, account_names: list[str] | None = None) -> int:
-        store = self.load_ranges_store()
-        entry = self.range_entry(store, range_name)
-        requested = int(entry.get("requested_total", 0) or 0)
+    def _range_existing_count(
+        self,
+        range_name: str,
+        account_name: str | None = None,
+        account_names: list[str] | None = None,
+        numbers_rows: list[dict[str, str]] | None = None,
+    ) -> int:
+        target_range = str(range_name or "").strip().lower()
+        if not target_range:
+            return 0
+        rows = numbers_rows if isinstance(numbers_rows, list) else self.fetch_numbers()
+        selected: set[str] = set()
         if account_names:
-            requested = 0
-            accounts = entry.get("accounts") if isinstance(entry.get("accounts"), dict) else {}
-            names_lc = {str(x).strip().lower() for x in account_names if str(x).strip()}
-            for name, row in accounts.items():
-                if not isinstance(row, dict):
+            selected = {str(x).strip().lower() for x in account_names if str(x).strip()}
+        elif account_name:
+            selected = {str(account_name).strip().lower()}
+        count = 0
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            rname = str(row.get("range") or "").strip().lower()
+            if rname != target_range:
+                continue
+            if selected:
+                acc = str(row.get("account") or "").strip().lower()
+                if acc not in selected:
                     continue
-                if str(name).strip().lower() in names_lc:
-                    requested += int(row.get("requested_total", 0) or 0)
-            return max(0, self.range_limit_total() * max(1, len(names_lc)) - requested)
-        if account_name:
-            accounts = entry.get("accounts") if isinstance(entry.get("accounts"), dict) else {}
-            acc_row = accounts.get(account_name) if isinstance(accounts.get(account_name), dict) else {}
-            requested = int(acc_row.get("requested_total", 0) or 0)
-        return max(0, self.range_limit_total() - requested)
+            count += 1
+        return count
+
+    def _range_remaining(
+        self,
+        range_name: str,
+        account_name: str | None = None,
+        account_names: list[str] | None = None,
+        numbers_rows: list[dict[str, str]] | None = None,
+    ) -> int:
+        selected_count = max(
+            1,
+            len([x for x in (account_names or []) if str(x).strip()]) if account_names else (1 if account_name else 1),
+        )
+        max_total = self.range_limit_total() * selected_count
+        existing = self._range_existing_count(range_name, account_name, account_names, numbers_rows=numbers_rows)
+        return max(0, max_total - existing)
 
     def kb_main(self, user_id: int) -> list[list[dict[str, Any]]]:
         enabled = self.fetch_codes_enabled()
@@ -1691,17 +1718,12 @@ class PanelBot:
             selected_names = [str(account_name).strip()]
 
         max_total = self.range_limit_total() * max(1, len(selected_names))
-        already = int(entry.get("requested_total", 0) or 0)
-        if selected_names:
-            accounts_map = entry.get("accounts") if isinstance(entry.get("accounts"), dict) else {}
-            already = 0
-            names_lc = {x.lower() for x in selected_names}
-            for n, acc_row in accounts_map.items():
-                if not isinstance(acc_row, dict):
-                    continue
-                if str(n).strip().lower() in names_lc:
-                    already += int(acc_row.get("requested_total", 0) or 0)
-        remaining = max_total - already
+        existing = self._range_existing_count(
+            range_name,
+            account_name=account_name if account_name else None,
+            account_names=selected_names if selected_names else None,
+        )
+        remaining = max_total - existing
         if remaining <= 0:
             return self._tr(user_id, f"الرينج {range_name} وصل الحد الأقصى ({max_total}).", f"Range {range_name} reached max limit ({max_total}).")
         if remaining < 50:
@@ -1764,14 +1786,21 @@ class PanelBot:
                 )
 
         self.save_ranges_store(store)
-        updated = self.range_entry(store, range_name)
-        new_remaining = max_total - int(updated.get("requested_total", 0) or 0)
+        live_rows_after = self.fetch_numbers()
+        existing_after = self._range_existing_count(
+            range_name,
+            account_name=account_name if account_name else None,
+            account_names=selected_names if selected_names else None,
+            numbers_rows=live_rows_after,
+        )
+        new_remaining = max(0, max_total - existing_after)
 
         return "\n".join(
             [
                 self._tr(user_id, f"تم تنفيذ طلب الرينج: {range_name}", f"Range request completed: {range_name}"),
                 self._tr(user_id, f"الإجمالي الناجح: {total_success}", f"Total success: {total_success}"),
                 *summary,
+                self._tr(user_id, f"الموجود الآن في الرينج: {existing_after}", f"Current existing in range: {existing_after}"),
                 self._tr(user_id, f"المتبقي من الحد: {max(0, new_remaining)}", f"Remaining limit: {max(0, new_remaining)}"),
             ]
         )
@@ -3581,14 +3610,16 @@ class PanelBot:
             if not selected:
                 self.send_text(chat_id, self._tr(user_id, "اختر حساب واحد على الأقل.", "Select at least one account."))
                 return
+            live_rows = self.fetch_numbers()
             store = self.load_ranges_store()
             hint_rows: list[str] = []
             ranges = store.get("ranges") if isinstance(store.get("ranges"), dict) else {}
             for rname, entry in list(ranges.items())[:10]:
                 if not isinstance(entry, dict):
                     continue
-                rem = self._range_remaining(str(rname), account_names=selected)
-                hint_rows.append(self._tr(user_id, f"- {rname} | المتبقي: {rem}", f"- {rname} | remaining: {rem}"))
+                existing = self._range_existing_count(str(rname), account_names=selected, numbers_rows=live_rows)
+                rem = self._range_remaining(str(rname), account_names=selected, numbers_rows=live_rows)
+                hint_rows.append(self._tr(user_id, f"- {rname} | الموجود: {existing} | المتبقي: {rem}", f"- {rname} | existing: {existing} | remaining: {rem}"))
             hint = "\n".join(hint_rows) if hint_rows else self._tr(user_id, "لا توجد رينجات محفوظة بعد.", "No saved ranges yet.")
             self.set_state(user_id, "wait_range_name", {"accounts": selected, "mode": "multi"})
             self.send_text(
@@ -3607,14 +3638,16 @@ class PanelBot:
             if not account_name:
                 self.answer_callback(callback_id, self._tr(user_id, "اختيار حساب غير صالح.", "Invalid account selection."))
                 return
+            live_rows = self.fetch_numbers()
             store = self.load_ranges_store()
             hint_rows: list[str] = []
             ranges = store.get("ranges") if isinstance(store.get("ranges"), dict) else {}
             for rname, entry in list(ranges.items())[:10]:
                 if not isinstance(entry, dict):
                     continue
-                rem = self._range_remaining(str(rname), account_name)
-                hint_rows.append(self._tr(user_id, f"- {rname} | المتبقي: {rem}", f"- {rname} | remaining: {rem}"))
+                existing = self._range_existing_count(str(rname), account_name, numbers_rows=live_rows)
+                rem = self._range_remaining(str(rname), account_name, numbers_rows=live_rows)
+                hint_rows.append(self._tr(user_id, f"- {rname} | الموجود: {existing} | المتبقي: {rem}", f"- {rname} | existing: {existing} | remaining: {rem}"))
             hint = "\n".join(hint_rows) if hint_rows else self._tr(user_id, "لا توجد رينجات محفوظة بعد.", "No saved ranges yet.")
             self.set_state(user_id, "wait_range_name", {"account": account_name, "mode": "normal"})
             self.send_text(
@@ -4279,19 +4312,21 @@ class PanelBot:
             range_name = text
             account_name = str(data.get("account") or "").strip()
             account_names = [str(x) for x in (data.get("accounts") or []) if str(x).strip()]
-            remain = self._range_remaining(range_name, account_name or None, account_names or None)
+            live_rows = self.fetch_numbers()
+            existing = self._range_existing_count(range_name, account_name or None, account_names or None, numbers_rows=live_rows)
+            remain = self._range_remaining(range_name, account_name or None, account_names or None, numbers_rows=live_rows)
             self.set_state(
                 user_id,
                 "wait_range_count",
-                {"range": range_name, "remaining": remain, "account": account_name, "accounts": account_names, "mode": data.get("mode")},
+                {"range": range_name, "remaining": remain, "existing": existing, "account": account_name, "accounts": account_names, "mode": data.get("mode")},
             )
             selected_text = account_name if account_name else ", ".join(account_names)
             self.send_text(
                 chat_id,
                 self._tr(
                     user_id,
-                    f"الحسابات: {selected_text}\nاكتب العدد المطلوب (مضاعف 50).\nالمتبقي للرينج {range_name}: {remain}",
-                    f"Accounts: {selected_text}\nType requested count (multiple of 50).\nRemaining for range {range_name}: {remain}",
+                    f"الحسابات: {selected_text}\nالموجود الآن في الرينج {range_name}: {existing}\nاكتب العدد المطلوب (مضاعف 50).\nالمتبقي للرينج: {remain}",
+                    f"Accounts: {selected_text}\nCurrent existing in range {range_name}: {existing}\nType requested count (multiple of 50).\nRemaining: {remain}",
                 ),
             )
             return

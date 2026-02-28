@@ -1,5 +1,5 @@
 import fcntl
-import signal
+import os
 import subprocess
 import sys
 import time
@@ -13,10 +13,14 @@ BASE_DIR = Path(__file__).resolve().parent
 LOCK_FILE = BASE_DIR / "logs" / "main.lock"
 
 
-def start_process(script_name: str, *extra_args: str) -> subprocess.Popen:
+def start_process(script_name: str, *extra_args: str, env_overrides: dict[str, str] | None = None) -> subprocess.Popen:
+    env = os.environ.copy()
+    for k, v in (env_overrides or {}).items():
+        env[str(k)] = str(v)
     return subprocess.Popen(
         [sys.executable, str(BASE_DIR / script_name), *extra_args],
         cwd=str(BASE_DIR),
+        env=env,
     )
 
 
@@ -40,6 +44,44 @@ def get_restart_marker() -> str:
     return str(cfg.get("bot_restart_requested_at", "")).strip()
 
 
+def build_specs() -> dict[str, tuple[str, tuple[str, ...], dict[str, str]]]:
+    specs: dict[str, tuple[str, tuple[str, ...], dict[str, str]]] = {
+        "sender": ("bot.py", ("--no-input",), {}),
+        "panel": ("panel_bot.py", (), {}),
+    }
+    cfg = db_load_json(RUNTIME_CONFIG_FILE, {})
+    if not isinstance(cfg, dict):
+        return specs
+    rows = cfg.get("managed_bots")
+    if not isinstance(rows, list):
+        return specs
+
+    for idx, row in enumerate(rows, start=1):
+        if not isinstance(row, dict):
+            continue
+        if not bool(row.get("enabled", True)):
+            continue
+        token = str(row.get("bot_token", "")).strip()
+        if not token or ":" not in token:
+            continue
+        bot_id = str(row.get("id", "")).strip() or str(idx)
+        key = f"managed_panel_{bot_id}"
+        specs[key] = (
+            "panel_bot.py",
+            (),
+            {"TELEGRAM_BOT_TOKEN": token},
+        )
+    return specs
+
+
+def specs_fingerprint(specs: dict[str, tuple[str, tuple[str, ...], dict[str, str]]]) -> tuple:
+    items: list[tuple[str, str, tuple[str, ...], tuple[tuple[str, str], ...]]] = []
+    for name, (script_name, extra_args, env_overrides) in specs.items():
+        env_items = tuple(sorted((str(k), str(v)) for k, v in (env_overrides or {}).items()))
+        items.append((name, script_name, tuple(extra_args), env_items))
+    return tuple(sorted(items))
+
+
 def stop_process(proc: subprocess.Popen, timeout_seconds: float = 8.0) -> None:
     if proc.poll() is not None:
         return
@@ -53,28 +95,31 @@ def stop_process(proc: subprocess.Popen, timeout_seconds: float = 8.0) -> None:
 
 def main() -> int:
     _lock_handle = acquire_main_lock()
-    print("Starting sender bot (bot.py) and control panel bot (panel_bot.py)...")
-    specs = {
-        "sender": ("bot.py", ("--no-input",)),
-        "panel": ("panel_bot.py", ()),
-    }
+    print("Starting sender/panel processes...")
+    specs = build_specs()
     procs = {
-        "sender": start_process("bot.py", "--no-input"),
-        "panel": start_process("panel_bot.py"),
+        name: start_process(script_name, *extra_args, env_overrides=env_overrides)
+        for name, (script_name, extra_args, env_overrides) in specs.items()
     }
+    last_specs_fp = specs_fingerprint(specs)
     last_restart_marker = get_restart_marker()
 
     try:
         while True:
             marker = get_restart_marker()
-            if marker and marker != last_restart_marker:
-                print(f"Restart requested by runtime config marker={marker}. Restarting bots...")
+            latest_specs = build_specs()
+            latest_specs_fp = specs_fingerprint(latest_specs)
+            if (marker and marker != last_restart_marker) or latest_specs_fp != last_specs_fp:
+                reason = f"marker={marker}" if (marker and marker != last_restart_marker) else "managed bots changed"
+                print(f"Restart requested ({reason}). Restarting processes...")
                 for p in procs.values():
                     stop_process(p)
+                specs = latest_specs
                 procs = {
-                    "sender": start_process("bot.py", "--no-input"),
-                    "panel": start_process("panel_bot.py"),
+                    name: start_process(script_name, *extra_args, env_overrides=env_overrides)
+                    for name, (script_name, extra_args, env_overrides) in specs.items()
                 }
+                last_specs_fp = latest_specs_fp
                 last_restart_marker = marker
                 time.sleep(1)
                 continue
@@ -83,8 +128,8 @@ def main() -> int:
                 rc = p.poll()
                 if rc is not None:
                     print(f"Process exited (name={name}, pid={p.pid}, code={rc}). Restarting process...")
-                    script_name, extra = specs[name]
-                    procs[name] = start_process(script_name, *extra)
+                    script_name, extra_args, env_overrides = specs[name]
+                    procs[name] = start_process(script_name, *extra_args, env_overrides=env_overrides)
             time.sleep(1)
     except KeyboardInterrupt:
         print("Stopping all processes...")

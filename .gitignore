@@ -1,14 +1,31 @@
+# Environment
 .env
-token_cache.json
-daily_messages/
-runtime_config.json
+
+# Python cache/build
 __pycache__/
-*.pyc
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Runtime data
+daily_messages/
 logs/
+exports/
+runtime_config.json
+token_cache.json
 ranges_store.json
+
+# Local database files
 data/storage.db
 data/*.db-shm
 data/*.db-wal
-exports/*.txt
-exports/*.csv
-exports/*.json
+data/*/storage.db
+data/*/*.db-shm
+data/*/*.db-wal
+
+# OS/editor junk
+.DS_Store
+Thumbs.db

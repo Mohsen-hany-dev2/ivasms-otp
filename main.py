@@ -47,8 +47,8 @@ def get_restart_marker() -> str:
 
 def build_specs() -> dict[str, tuple[str, tuple[str, ...], dict[str, str]]]:
     specs: dict[str, tuple[str, tuple[str, ...], dict[str, str]]] = {
-        "sender": ("bot.py", ("--no-input",), {"BOT_INSTANCE_KEY": "main"}),
-        "panel": ("panel_bot.py", (), {"BOT_INSTANCE_KEY": "main"}),
+        "sender": ("bot.py", ("--no-input",), {}),
+        "panel": ("panel_bot.py", (), {}),
     }
     cfg = db_load_json(RUNTIME_CONFIG_FILE, {})
     if not isinstance(cfg, dict):
@@ -69,7 +69,7 @@ def build_specs() -> dict[str, tuple[str, tuple[str, ...], dict[str, str]]]:
         if storage_mode not in {"private", "shared"}:
             storage_mode = "private"
         bot_id = str(row.get("id", "")).strip() or str(idx)
-        env_overrides = {"TELEGRAM_BOT_TOKEN": token, "BOT_INSTANCE_KEY": f"managed:{bot_id}"}
+        env_overrides = {"TELEGRAM_BOT_TOKEN": token}
         try:
             bot_accounts_limit = int(str(row.get("accounts_limit", 0)).strip() or "0")
         except Exception:

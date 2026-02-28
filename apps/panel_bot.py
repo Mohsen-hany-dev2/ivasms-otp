@@ -103,12 +103,6 @@ class PanelBot:
     def is_main_instance(self) -> bool:
         return str(NAMESPACE).strip().lower() == "main"
 
-    def instance_key(self) -> str:
-        key = str(os.getenv("BOT_INSTANCE_KEY", "")).strip()
-        if key:
-            return key
-        return "main" if self.is_main_instance() else str(NAMESPACE).strip().lower()
-
     def has_full_vars_access(self, user_id: int) -> bool:
         # Full variables are only for the primary admin on the main bot instance.
         return self.is_main_instance() and self.is_primary_admin(user_id)

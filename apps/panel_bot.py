@@ -383,17 +383,19 @@ class PanelBot:
         for row in rows:
             if not isinstance(row, dict):
                 continue
-            tok = str(row.get("token", "")).strip()
+            tok = str(row.get("token", "") or row.get("bot_token", "")).strip()
             if not tok:
                 continue
-            storage = str(row.get("storage", "private")).strip().lower()
+            storage = str(row.get("storage", "") or row.get("storage_mode", "private")).strip().lower()
             if storage not in {"private", "shared"}:
                 storage = "private"
             out.append(
                 {
                     "id": str(row.get("id", "")).strip(),
                     "token": tok,
+                    "bot_token": tok,
                     "storage": storage,
+                    "storage_mode": storage,
                     "created_by": str(row.get("created_by", "")).strip(),
                     "created_at": str(row.get("created_at", "")).strip(),
                     "bot_username": str(row.get("bot_username", "")).strip(),
@@ -419,10 +421,14 @@ class PanelBot:
         out: list[dict[str, Any]] = []
         found = False
         for row in rows:
-            if str(row.get("token", "")).strip() == tok:
+            row_tok = str(row.get("token", "") or row.get("bot_token", "")).strip()
+            if row_tok == tok:
                 if not str(row.get("id", "")).strip():
                     row["id"] = hashlib.sha1(tok.encode("utf-8")).hexdigest()[:16]
                 row["storage"] = storage_value
+                row["storage_mode"] = storage_value
+                row["token"] = tok
+                row["bot_token"] = tok
                 row["created_by"] = str(created_by)
                 row["created_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 row["bot_username"] = str(bot_username or row.get("bot_username", "")).strip()
@@ -437,7 +443,9 @@ class PanelBot:
                 {
                     "id": hashlib.sha1(tok.encode("utf-8")).hexdigest()[:16],
                     "token": tok,
+                    "bot_token": tok,
                     "storage": storage_value,
+                    "storage_mode": storage_value,
                     "created_by": str(created_by),
                     "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "bot_username": str(bot_username or "").strip(),

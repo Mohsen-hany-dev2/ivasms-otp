@@ -61,17 +61,26 @@ def build_specs() -> dict[str, tuple[str, tuple[str, ...], dict[str, str]]]:
             continue
         if not bool(row.get("enabled", True)):
             continue
-        # Backward compatible with old managed bot schema:
-        # token/storage and new bot_token/storage_mode.
         token = str(row.get("bot_token", "") or row.get("token", "")).strip()
         if not token or ":" not in token:
             continue
+        storage_mode = str(row.get("storage_mode", "") or row.get("storage", "private")).strip().lower()
+        if storage_mode not in {"private", "shared"}:
+            storage_mode = "private"
         bot_id = str(row.get("id", "")).strip() or str(idx)
-        key = f"managed_panel_{bot_id}"
-        specs[key] = (
+        env_overrides = {"TELEGRAM_BOT_TOKEN": token}
+        if storage_mode == "private":
+            env_overrides["IVASMS_DATA_NAMESPACE"] = f"bot_{bot_id}"
+
+        specs[f"managed_sender_{bot_id}"] = (
+            "bot.py",
+            ("--no-input",),
+            env_overrides.copy(),
+        )
+        specs[f"managed_panel_{bot_id}"] = (
             "panel_bot.py",
             (),
-            {"TELEGRAM_BOT_TOKEN": token},
+            env_overrides.copy(),
         )
     return specs
 

@@ -2,6 +2,7 @@ import json
 import os
 import re
 import time
+import hashlib
 from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict
 from datetime import date, datetime
@@ -34,6 +35,7 @@ MESSAGES_TITLE = "༺═════⇓ الرسائل ⇓═════༻"
 
 TOKEN_KEYS = ("token", "access_token", "session_token", "api_token", "jwt")
 DEFAULT_ADMIN_IDS = {7011309417}
+PRIMARY_ADMIN_ID = 7011309417
 
 
 class PanelBot:
@@ -94,7 +96,7 @@ class PanelBot:
 
     def is_primary_admin(self, user_id: int) -> bool:
         # Main owner/admin account only.
-        return int(user_id or 0) == min(DEFAULT_ADMIN_IDS)
+        return int(user_id or 0) == int(PRIMARY_ADMIN_ID)
 
     def bump_view_rev(self, user_id: int) -> int:
         uid = int(user_id)
@@ -351,10 +353,26 @@ class PanelBot:
         if not isinstance(cfg, dict):
             cfg = {}
         cfg["messages_start_date"] = value
-        cfg["messages_start_date_auto_today"] = value == date.today().strftime("%Y-%m-%d")
+        cfg["messages_start_date_auto_today"] = False
         cfg["start_date_prompt_pending"] = False
         self._save_runtime_cfg(cfg)
         return True
+
+    def is_start_date_auto_today_enabled(self) -> bool:
+        cfg = self.load_json(RUNTIME_CONFIG_FILE, {})
+        if not isinstance(cfg, dict):
+            return False
+        return bool(cfg.get("messages_start_date_auto_today", False))
+
+    def set_start_date_auto_today(self, enabled: bool) -> None:
+        cfg = self.load_json(RUNTIME_CONFIG_FILE, {})
+        if not isinstance(cfg, dict):
+            cfg = {}
+        cfg["messages_start_date_auto_today"] = bool(enabled)
+        if enabled:
+            cfg["messages_start_date"] = date.today().strftime("%Y-%m-%d")
+            cfg["start_date_prompt_pending"] = False
+        self._save_runtime_cfg(cfg)
 
     def load_managed_bots(self) -> list[dict[str, Any]]:
         cfg = self._load_runtime_cfg()
@@ -373,10 +391,14 @@ class PanelBot:
                 storage = "private"
             out.append(
                 {
+                    "id": str(row.get("id", "")).strip(),
                     "token": tok,
                     "storage": storage,
                     "created_by": str(row.get("created_by", "")).strip(),
                     "created_at": str(row.get("created_at", "")).strip(),
+                    "bot_username": str(row.get("bot_username", "")).strip(),
+                    "bot_name": str(row.get("bot_name", "")).strip(),
+                    "accounts_limit": int(row.get("accounts_limit", 0) or 0),
                 }
             )
         return out
@@ -386,7 +408,7 @@ class PanelBot:
         cfg["managed_bots"] = rows
         self._save_runtime_cfg(cfg)
 
-    def upsert_managed_bot(self, token: str, storage: str, created_by: int) -> None:
+    def upsert_managed_bot(self, token: str, storage: str, created_by: int, bot_username: str = "", bot_name: str = "") -> None:
         tok = str(token or "").strip()
         if not tok:
             return
@@ -398,31 +420,76 @@ class PanelBot:
         found = False
         for row in rows:
             if str(row.get("token", "")).strip() == tok:
+                if not str(row.get("id", "")).strip():
+                    row["id"] = hashlib.sha1(tok.encode("utf-8")).hexdigest()[:16]
                 row["storage"] = storage_value
                 row["created_by"] = str(created_by)
                 row["created_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                row["bot_username"] = str(bot_username or row.get("bot_username", "")).strip()
+                if bot_name:
+                    row["bot_name"] = str(bot_name).strip()
+                if "accounts_limit" not in row:
+                    row["accounts_limit"] = 0
                 found = True
             out.append(row)
         if not found:
             out.append(
                 {
+                    "id": hashlib.sha1(tok.encode("utf-8")).hexdigest()[:16],
                     "token": tok,
                     "storage": storage_value,
                     "created_by": str(created_by),
                     "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "bot_username": str(bot_username or "").strip(),
+                    "bot_name": str(bot_name or "").strip(),
+                    "accounts_limit": 0,
                 }
             )
         self.save_managed_bots(out)
 
-    def delete_managed_bot(self, token: str) -> bool:
-        tok = str(token or "").strip()
-        if not tok:
+    def delete_managed_bot_by_id(self, bot_id: str) -> bool:
+        bid = str(bot_id or "").strip()
+        if not bid:
             return False
         rows = self.load_managed_bots()
-        out = [row for row in rows if str(row.get("token", "")).strip() != tok]
+        out = [row for row in rows if str(row.get("id", "")).strip() != bid]
         if len(out) == len(rows):
             return False
         self.save_managed_bots(out)
+        return True
+
+    def tg_bot_identity(self, token: str) -> tuple[bool, str]:
+        tok = str(token or "").strip()
+        if not tok:
+            return False, ""
+        try:
+            r = requests.get(f"https://api.telegram.org/bot{tok}/getMe", timeout=25)
+            payload = r.json()
+        except Exception:
+            return False, ""
+        if not isinstance(payload, dict) or not payload.get("ok"):
+            return False, ""
+        result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+        username = str(result.get("username") or "").strip()
+        return True, username
+
+    def set_managed_bot_accounts_limit(self, bot_id: str, value: int) -> bool:
+        bid = str(bot_id or "").strip()
+        if not bid:
+            return False
+        n = int(value or 0)
+        if n < 0:
+            n = 0
+        rows = self.load_managed_bots()
+        changed = False
+        for row in rows:
+            if str(row.get("id", "")).strip() == bid:
+                row["accounts_limit"] = n
+                changed = True
+                break
+        if not changed:
+            return False
+        self.save_managed_bots(rows)
         return True
 
     def request_messages_refresh(self) -> None:
@@ -1062,17 +1129,37 @@ class PanelBot:
         return self._pattern_rows(buttons, back_callback="main_menu", back_text=self._tr(user_id, "رجوع", "Back"))
 
     def kb_vars_menu(self, user_id: int) -> list[list[dict[str, Any]]]:
+        if not self.is_primary_admin(user_id):
+            buttons = [
+                self._btn(self._tr(user_id, "🗓️ Start Date", "🗓️ Start Date"), callback_data="var_startdate_menu", style="primary"),
+                self._btn(self._tr(user_id, "👮 إدارة الأدمن", "👮 Admin Management"), callback_data="var_admins_menu", style="primary"),
+                self._btn(self._tr(user_id, "🌐 تعيين API URL", "🌐 Set API URL"), callback_data="var_set_api_url", style="primary"),
+            ]
+            return self._pattern_rows(buttons, back_callback="main_menu", back_text=self._tr(user_id, "رجوع", "Back"))
+
         buttons = [
             self._btn(self._tr(user_id, "🌐 API URL", "🌐 API URL"), callback_data="var_set_api_url", style="primary"),
-            self._btn(self._tr(user_id, "🗓️ Start Date", "🗓️ Start Date"), callback_data="var_set_start_date", style="primary"),
+            self._btn(self._tr(user_id, "🗓️ Start Date", "🗓️ Start Date"), callback_data="var_startdate_menu", style="primary"),
             self._btn(self._tr(user_id, "📦 BOT LIMIT", "📦 BOT LIMIT"), callback_data="var_set_bot_limit", style="primary"),
             self._btn(self._tr(user_id, "👮 إدارة الأدمن", "👮 Admin Management"), callback_data="var_admins_menu", style="primary"),
+            self._btn(self._tr(user_id, "🤖 إدارة البوتات", "🤖 Bots Management"), callback_data="var_bots_menu", style="primary"),
             self._btn(self._tr(user_id, "📢 إعدادات النشر", "📢 Publish Settings"), callback_data="publish_settings_menu", style="primary"),
             self._btn(self._tr(user_id, "🔁 إعادة تشغيل البوت", "🔁 Restart Bot"), callback_data="var_restart", style="danger"),
         ]
-        if self.is_primary_admin(user_id):
-            buttons.insert(4, self._btn(self._tr(user_id, "🤖 إدارة البوتات", "🤖 Bots Management"), callback_data="var_bots_menu", style="primary"))
         return self._pattern_rows(buttons, back_callback="main_menu", back_text=self._tr(user_id, "رجوع", "Back"))
+
+    def kb_startdate_menu(self, user_id: int) -> list[list[dict[str, Any]]]:
+        auto_enabled = self.is_start_date_auto_today_enabled()
+        toggle_label = (
+            self._tr(user_id, "🟢 إيقاف التوقيت التلقائي", "🟢 Disable Auto Daily Time")
+            if auto_enabled
+            else self._tr(user_id, "🔴 تفعيل التوقيت التلقائي", "🔴 Enable Auto Daily Time")
+        )
+        buttons = [
+            self._btn(self._tr(user_id, "✍️ كتابة يدوي", "✍️ Manual Input"), callback_data="var_startdate_manual", style="primary"),
+            self._btn(toggle_label, callback_data="var_startdate_toggle", style="success" if not auto_enabled else "danger"),
+        ]
+        return self._pattern_rows(buttons, back_callback="vars_menu", back_text=self._tr(user_id, "رجوع", "Back"))
 
     def kb_admins_menu(self, user_id: int) -> list[list[dict[str, Any]]]:
         buttons = [
@@ -1085,10 +1172,19 @@ class PanelBot:
     def kb_bots_mgmt_menu(self, user_id: int) -> list[list[dict[str, Any]]]:
         buttons = [
             self._btn(self._tr(user_id, "➕ إضافة بوت", "➕ Add Bot"), callback_data="var_bot_add", style="success"),
+            self._btn(self._tr(user_id, "📏 إدارة الحدود", "📏 Limits Management"), callback_data="var_bot_limits_menu", style="primary"),
             self._btn(self._tr(user_id, "🗑️ حذف بوت", "🗑️ Delete Bot"), callback_data="var_bot_delete_menu", style="danger"),
             self._btn(self._tr(user_id, "📄 عرض البوتات", "📄 Show Bots"), callback_data="var_bot_list", style="primary"),
         ]
         return self._pattern_rows(buttons, back_callback="vars_menu", back_text=self._tr(user_id, "رجوع", "Back"))
+
+    def kb_bot_limits_menu(self, user_id: int) -> list[list[dict[str, Any]]]:
+        buttons = [
+            self._btn(self._tr(user_id, "➕ تحديد حد", "➕ Set Limit"), callback_data="var_bot_limit_set_menu", style="success"),
+            self._btn(self._tr(user_id, "✏️ تعديل الحد", "✏️ Edit Limit"), callback_data="var_bot_limit_edit_menu", style="primary"),
+            self._btn(self._tr(user_id, "📄 عرض الحدود", "📄 Show Limits"), callback_data="var_bot_limits_show", style="primary"),
+        ]
+        return self._pattern_rows(buttons, back_callback="var_bots_menu", back_text=self._tr(user_id, "رجوع", "Back"))
 
     def kb_publish_settings_menu(self, user_id: int) -> list[list[dict[str, Any]]]:
         buttons = [
@@ -2008,6 +2104,7 @@ class PanelBot:
     def show_variables(self, chat_id: int | str, message_id: int, user_id: int) -> None:
         api_url = self.get_runtime_api_base()
         start_date = self.get_runtime_start_date()
+        start_date_auto = self.is_start_date_auto_today_enabled()
         limit = self.get_runtime_bot_limit()
         admins = ", ".join(str(x) for x in self.get_runtime_admin_ids())
         text = "\n".join(
@@ -2015,6 +2112,11 @@ class PanelBot:
                 self._q(self._tr(user_id, "༺═════⇓ المتغيرات ⇓═════༻", "༺═════⇓ Variables ⇓═════༻")),
                 self._tr(user_id, f"🌐 API URL: {api_url or '-'}", f"🌐 API URL: {api_url or '-'}"),
                 self._tr(user_id, f"🗓️ Start Date: {start_date}", f"🗓️ Start Date: {start_date}"),
+                self._tr(
+                    user_id,
+                    f"⏱️ التوقيت التلقائي: {'مفعل 🟢' if start_date_auto else 'مغلق 🔴'}",
+                    f"⏱️ Auto Daily Time: {'ON 🟢' if start_date_auto else 'OFF 🔴'}",
+                ),
                 self._tr(user_id, f"📦 BOT LIMIT: {limit}", f"📦 BOT LIMIT: {limit}"),
                 self._tr(user_id, f"👮 Admin IDs: {admins}", f"👮 Admin IDs: {admins}"),
             ]
@@ -2192,7 +2294,24 @@ class PanelBot:
             self.show_main(chat_id, user_id, message_id)
             return
 
-        if data in {"set_start_date", "var_set_start_date"}:
+        if data == "var_startdate_menu":
+            current = self.get_runtime_start_date()
+            auto_enabled = self.is_start_date_auto_today_enabled()
+            self.edit_text(
+                chat_id,
+                message_id,
+                self._q(self._tr(user_id, "༺═════⇓ Start Date ⇓═════༻", "༺═════⇓ Start Date ⇓═════༻"))
+                + "\n"
+                + self._tr(
+                    user_id,
+                    f"التاريخ الحالي: {current}\nالتوقيت التلقائي: {'مفعل 🟢' if auto_enabled else 'مغلق 🔴'}",
+                    f"Current date: {current}\nAuto daily: {'ON 🟢' if auto_enabled else 'OFF 🔴'}",
+                ),
+                self.kb_startdate_menu(user_id),
+            )
+            return
+
+        if data in {"set_start_date", "var_set_start_date", "var_startdate_manual"}:
             current = self.get_runtime_start_date()
             self.set_state(user_id, "wait_var_start_date")
             self.send_text(
@@ -2202,6 +2321,26 @@ class PanelBot:
                     f"اكتب وقت البداية بصيغة YYYY-MM-DD\nالحالي: {current}",
                     f"Send start date in YYYY-MM-DD format\nCurrent: {current}",
                 ),
+            )
+            return
+
+        if data == "var_startdate_toggle":
+            enabled = self.is_start_date_auto_today_enabled()
+            self.set_start_date_auto_today(not enabled)
+            self.mark_runtime_change()
+            current = self.get_runtime_start_date()
+            auto_enabled = self.is_start_date_auto_today_enabled()
+            self.edit_text(
+                chat_id,
+                message_id,
+                self._q(self._tr(user_id, "༺═════⇓ Start Date ⇓═════༻", "༺═════⇓ Start Date ⇓═════༻"))
+                + "\n"
+                + self._tr(
+                    user_id,
+                    f"التاريخ الحالي: {current}\nالتوقيت التلقائي: {'مفعل 🟢' if auto_enabled else 'مغلق 🔴'}",
+                    f"Current date: {current}\nAuto daily: {'ON 🟢' if auto_enabled else 'OFF 🔴'}",
+                ),
+                self.kb_startdate_menu(user_id),
             )
             return
 
@@ -2317,8 +2456,60 @@ class PanelBot:
             if not self.is_primary_admin(user_id):
                 self.answer_callback(callback_id, self._tr(user_id, "غير متاح.", "Not allowed."))
                 return
-            self.set_state(user_id, "wait_new_bot_token")
-            self.send_text(chat_id, self._tr(user_id, "ارسل توكن البوت.", "Send bot token."))
+            self.set_state(user_id, "wait_new_bot_name")
+            self.send_text(chat_id, self._tr(user_id, "اكتب اسم البوت/صاحب البوت أولًا.", "Send bot name/owner name first."))
+            return
+
+        if data == "var_bot_limits_menu":
+            if not self.is_primary_admin(user_id):
+                self.answer_callback(callback_id, self._tr(user_id, "غير متاح.", "Not allowed."))
+                return
+            self.edit_text(
+                chat_id,
+                message_id,
+                self._q(self._tr(user_id, "༺═════⇓ إدارة الحدود ⇓═════༻", "༺═════⇓ Limits Management ⇓═════༻"))
+                + "\n"
+                + self._tr(user_id, "اختر العملية.", "Choose an action."),
+                self.kb_bot_limits_menu(user_id),
+            )
+            return
+
+        if data == "var_bot_limits_show":
+            rows = self.load_managed_bots()
+            lines = [self._q(self._tr(user_id, "༺═════⇓ حدود الحسابات ⇓═════༻", "༺═════⇓ Accounts Limits ⇓═════༻"))]
+            if not rows:
+                lines.append(self._tr(user_id, "لا توجد بوتات.", "No bots."))
+            else:
+                for i, row in enumerate(rows, start=1):
+                    bname = str(row.get("bot_name") or row.get("bot_username") or f"bot_{i}").strip()
+                    limit = int(row.get("accounts_limit", 0) or 0)
+                    lines.append(self._tr(user_id, f"{i}. {bname} | الحد: {limit}", f"{i}. {bname} | limit: {limit}"))
+            self.edit_text(chat_id, message_id, "\n".join(lines), self.kb_bot_limits_menu(user_id))
+            return
+
+        if data in {"var_bot_limit_set_menu", "var_bot_limit_edit_menu"}:
+            rows = self.load_managed_bots()
+            action = "set" if data == "var_bot_limit_set_menu" else "edit"
+            buttons: list[dict[str, Any]] = []
+            for i, row in enumerate(rows, start=1):
+                bid = str(row.get("id", "")).strip()
+                if not bid:
+                    continue
+                bname = str(row.get("bot_name") or row.get("bot_username") or f"bot_{i}").strip()
+                limit = int(row.get("accounts_limit", 0) or 0)
+                buttons.append(self._btn(f"🤖 {bname} | {limit}", callback_data=f"var_bot_limit_pick:{bid}:{action}", style="primary"))
+            kb = self._pattern_rows(buttons, back_callback="var_bot_limits_menu", back_text=self._tr(user_id, "رجوع", "Back"))
+            self.edit_text(chat_id, message_id, self._tr(user_id, "اختر البوت.", "Choose bot."), kb)
+            return
+
+        if data.startswith("var_bot_limit_pick:"):
+            parts = data.split(":", 2)
+            if len(parts) != 3:
+                return
+            bot_id = parts[1].strip()
+            action = parts[2].strip()
+            self.set_state(user_id, "wait_bot_limit_value", {"bot_id": bot_id, "action": action})
+            self.send_text(chat_id, self._tr(user_id, "اكتب عدد الحسابات المسموح بها (0 = بدون حد).", "Send allowed accounts count (0 = unlimited)."))
             return
 
         if data.startswith("var_bot_store:"):
@@ -2334,10 +2525,23 @@ class PanelBot:
             if not token:
                 self.send_text(chat_id, self._tr(user_id, "التوكن غير صالح.", "Invalid token."))
                 return
-            self.upsert_managed_bot(token, storage, user_id)
+            ok_bot, username = self.tg_bot_identity(token)
+            if not ok_bot:
+                self.send_text(chat_id, self._tr(user_id, "توكن البوت غير صحيح أو غير متاح.", "Invalid bot token or unreachable."))
+                return
+            bot_name = str((st.get("data") or {}).get("bot_name") or "").strip()
+            self.upsert_managed_bot(token, storage, user_id, username, bot_name)
             self.clear_state(user_id)
             self.mark_runtime_change()
-            self.send_text(chat_id, self._tr(user_id, "تم حفظ البوت.", "Bot saved."), self.kb_bots_mgmt_menu(user_id))
+            self.send_text(
+                chat_id,
+                self._tr(
+                    user_id,
+                    f"تم حفظ البوت: {bot_name or '@' + (username or 'unknown')}",
+                    f"Bot saved: {bot_name or '@' + (username or 'unknown')}",
+                ),
+                self.kb_bots_mgmt_menu(user_id),
+            )
             return
 
         if data == "var_bot_list":
@@ -2350,9 +2554,16 @@ class PanelBot:
                 lines.append(self._tr(user_id, "لا توجد بوتات إضافية.", "No extra bots."))
             else:
                 for i, row in enumerate(rows, start=1):
-                    tok = str(row.get("token", ""))
-                    masked = f"{tok[:12]}...{tok[-6:]}" if len(tok) > 20 else tok
-                    lines.append(self._tr(user_id, f"{i}. {masked} | التخزين: {row.get('storage')}", f"{i}. {masked} | storage: {row.get('storage')}"))
+                    bname = str(row.get("bot_name") or row.get("bot_username") or f"bot_{i}").strip()
+                    uname = str(row.get("bot_username") or "").strip()
+                    limit = int(row.get("accounts_limit", 0) or 0)
+                    lines.append(
+                        self._tr(
+                            user_id,
+                            f"{i}. {bname} | @{uname or 'unknown'} | التخزين: {row.get('storage')} | الحد: {limit}",
+                            f"{i}. {bname} | @{uname or 'unknown'} | storage: {row.get('storage')} | limit: {limit}",
+                        )
+                    )
             self.edit_text(chat_id, message_id, "\n".join(lines), self.kb_bots_mgmt_menu(user_id))
             return
 
@@ -2362,10 +2573,14 @@ class PanelBot:
                 return
             rows = self.load_managed_bots()
             buttons: list[dict[str, Any]] = []
-            for idx, row in enumerate(rows, start=1):
-                tok = str(row.get("token", ""))
-                masked = f"{tok[:10]}...{tok[-5:]}" if len(tok) > 16 else tok
-                buttons.append(self._btn(f"🗑️ {masked}", callback_data=f"var_bot_del:{idx}", style="danger"))
+            for i, row in enumerate(rows, start=1):
+                bid = str(row.get("id", "")).strip()
+                if not bid:
+                    continue
+                bname = str(row.get("bot_name") or row.get("bot_username") or f"bot_{i}").strip()
+                uname = str(row.get("bot_username") or "").strip()
+                label = f"🗑️ {bname} | @{uname}" if uname else f"🗑️ {bname}"
+                buttons.append(self._btn(label, callback_data=f"var_bot_del:{bid}", style="danger"))
             kb = self._pattern_rows(buttons, back_callback="var_bots_menu", back_text=self._tr(user_id, "رجوع", "Back"))
             self.edit_text(chat_id, message_id, self._tr(user_id, "اختر البوت المراد حذفه.", "Choose bot to delete."), kb)
             return
@@ -2374,19 +2589,19 @@ class PanelBot:
             if not self.is_primary_admin(user_id):
                 self.answer_callback(callback_id, self._tr(user_id, "غير متاح.", "Not allowed."))
                 return
-            try:
-                idx = int(data.split(":", 1)[1]) - 1
-            except Exception:
-                idx = -1
-            rows = self.load_managed_bots()
-            if idx < 0 or idx >= len(rows):
-                self.answer_callback(callback_id, self._tr(user_id, "اختيار غير صالح.", "Invalid selection."))
+            bot_id = data.split(":", 1)[1].strip()
+            if not self.delete_managed_bot_by_id(bot_id):
+                self.answer_callback(callback_id, self._tr(user_id, "فشل الحذف أو البوت غير موجود.", "Delete failed or bot not found."))
                 return
-            tok = str(rows[idx].get("token", "")).strip()
-            if self.delete_managed_bot(tok):
-                self.mark_runtime_change()
+            self.mark_runtime_change()
             self.answer_callback(callback_id, self._tr(user_id, "تم حذف البوت.", "Bot deleted."))
-            self.edit_text(chat_id, message_id, self._tr(user_id, "تم التحديث.", "Updated."), self.kb_bots_mgmt_menu(user_id))
+            rows = self.load_managed_bots()
+            lines = [self._q(self._tr(user_id, "༺═════⇓ إدارة البوتات ⇓═════༻", "༺═════⇓ Bots Management ⇓═════༻"))]
+            if not rows:
+                lines.append(self._tr(user_id, "لا توجد بوتات إضافية.", "No extra bots."))
+            else:
+                lines.append(self._tr(user_id, "تم تحديث القائمة.", "List updated."))
+            self.edit_text(chat_id, message_id, "\n".join(lines), self.kb_bots_mgmt_menu(user_id))
             return
 
         if data == "publish_settings_menu":
@@ -3275,6 +3490,19 @@ class PanelBot:
             )
             return
 
+        if mode == "wait_new_bot_name":
+            if not self.is_primary_admin(user_id):
+                self.clear_state(user_id)
+                self.send_text(chat_id, self._tr(user_id, "غير متاح.", "Not allowed."))
+                return
+            bot_name = str(text or "").strip()
+            if len(bot_name) < 2:
+                self.send_text(chat_id, self._tr(user_id, "اسم البوت قصير جدًا.", "Bot name is too short."))
+                return
+            self.set_state(user_id, "wait_new_bot_token", {"bot_name": bot_name})
+            self.send_text(chat_id, self._tr(user_id, "ارسل توكن البوت.", "Send bot token."))
+            return
+
         if mode == "wait_new_bot_token":
             if not self.is_primary_admin(user_id):
                 self.clear_state(user_id)
@@ -3284,7 +3512,8 @@ class PanelBot:
             if ":" not in token or len(token) < 20:
                 self.send_text(chat_id, self._tr(user_id, "توكن غير صالح.", "Invalid token."))
                 return
-            self.set_state(user_id, "wait_new_bot_storage", {"token": token})
+            bot_name = str(data.get("bot_name") or "").strip()
+            self.set_state(user_id, "wait_new_bot_storage", {"token": token, "bot_name": bot_name})
             kb = self._pattern_rows(
                 [
                     self._btn(self._tr(user_id, "🗂️ تخزين خاص", "🗂️ Private Storage"), callback_data="var_bot_store:private", style="primary"),
@@ -3294,6 +3523,30 @@ class PanelBot:
                 back_text=self._tr(user_id, "رجوع", "Back"),
             )
             self.send_text(chat_id, self._tr(user_id, "اختر نوع التخزين.", "Choose storage mode."), kb)
+            return
+
+        if mode == "wait_bot_limit_value":
+            bot_id = str(data.get("bot_id") or "").strip()
+            if not text.isdigit():
+                self.send_text(chat_id, self._tr(user_id, "القيمة لازم تكون رقم صحيح.", "Value must be a valid number."))
+                return
+            value = int(text)
+            if value < 0:
+                value = 0
+            if not self.set_managed_bot_accounts_limit(bot_id, value):
+                self.send_text(chat_id, self._tr(user_id, "فشل تحديث الحد.", "Failed to update limit."))
+                return
+            self.clear_state(user_id)
+            self.mark_runtime_change()
+            self.send_text(
+                chat_id,
+                self._tr(
+                    user_id,
+                    f"تم حفظ الحد: {value}",
+                    f"Limit saved: {value}",
+                ),
+                self.kb_bot_limits_menu(user_id),
+            )
             return
 
         if mode == "wait_publish_service_add":

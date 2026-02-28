@@ -106,6 +106,7 @@ class PanelBot:
         self.cache_ttl_seconds = 45
         self.platforms_cache: dict[str, Any] = {"at": 0.0, "data": []}
         self.traffic_cache: dict[str, dict[str, Any]] = {}
+        self.user_platforms_cache: dict[int, list[str]] = {}
         self.user_traffic_cache: dict[int, dict[str, list[dict[str, str]]]] = {}
         self.user_numbers_cache: dict[int, dict[str, list[dict[str, str]]]] = {}
         self.user_numbers_view_account: dict[int, str | None] = {}
@@ -1276,6 +1277,15 @@ class PanelBot:
             return rows
         return None
 
+    def _set_user_platforms_rows(self, user_id: int, rows: list[str]) -> None:
+        self.user_platforms_cache[int(user_id)] = [str(x) for x in rows]
+
+    def _get_user_platforms_rows(self, user_id: int) -> list[str] | None:
+        rows = self.user_platforms_cache.get(int(user_id))
+        if isinstance(rows, list):
+            return [str(x) for x in rows]
+        return None
+
     def _btn(
         self,
         text: str,
@@ -2170,7 +2180,14 @@ class PanelBot:
     ) -> None:
         if not self.is_view_current(user_id, view_rev):
             return
-        apps = self.fetch_platforms(refresh=refresh)
+        if refresh:
+            apps = self.fetch_platforms(refresh=True)
+            self._set_user_platforms_rows(user_id, apps)
+        else:
+            apps = self._get_user_platforms_rows(user_id)
+            if apps is None:
+                apps = self.fetch_platforms(refresh=False)
+                self._set_user_platforms_rows(user_id, apps)
         if not self.is_view_current(user_id, view_rev):
             return
         if not apps:
@@ -2215,7 +2232,14 @@ class PanelBot:
     def _render_traffic_menu(self, chat_id: int | str, message_id: int, user_id: int, page: int = 1, refresh: bool = False, view_rev: int | None = None) -> None:
         if not self.is_view_current(user_id, view_rev):
             return
-        apps = self.fetch_platforms(refresh=refresh)
+        if refresh:
+            apps = self.fetch_platforms(refresh=True)
+            self._set_user_platforms_rows(user_id, apps)
+        else:
+            apps = self._get_user_platforms_rows(user_id)
+            if apps is None:
+                apps = self.fetch_platforms(refresh=False)
+                self._set_user_platforms_rows(user_id, apps)
         if not self.is_view_current(user_id, view_rev):
             return
         per_page = 10
@@ -2311,8 +2335,8 @@ class PanelBot:
             rows = self.fetch_traffic(app_name, refresh=True)
             self._set_user_traffic_rows(user_id, app_name, rows)
         else:
-            rows = self._get_user_traffic_rows(user_id, app_name) or []
-            if not rows:
+            rows = self._get_user_traffic_rows(user_id, app_name)
+            if rows is None:
                 rows = self.fetch_traffic(app_name, refresh=True)
                 self._set_user_traffic_rows(user_id, app_name, rows)
         if not self.is_view_current(user_id, view_rev):
@@ -2342,8 +2366,8 @@ class PanelBot:
             rows = self.fetch_numbers(account_name=account_name)
             self._set_user_numbers_rows(user_id, rows, scope=scope_key)
         else:
-            rows = self._get_user_numbers_rows(user_id, scope=scope_key) or []
-            if not rows:
+            rows = self._get_user_numbers_rows(user_id, scope=scope_key)
+            if rows is None:
                 rows = self.fetch_numbers(account_name=account_name)
                 self._set_user_numbers_rows(user_id, rows, scope=scope_key)
         if not self.is_view_current(user_id, view_rev):
@@ -3551,7 +3575,6 @@ class PanelBot:
             except Exception:
                 page = 1
             rev = self.user_view_rev.get(user_id, 0)
-            self._show_loading(chat_id, message_id, TRAFFIC_TITLE, self._tr(user_id, "⏳ جاري تحميل المنصات...", "⏳ Loading platforms..."), "main_menu", user_id)
             self._run_async(self._render_traffic_menu, chat_id, message_id, user_id, page, False, rev)
             return
 
@@ -3572,7 +3595,6 @@ class PanelBot:
             except Exception:
                 page = 1
             rev = self.user_view_rev.get(user_id, 0)
-            self._show_loading(chat_id, message_id, TRAFFIC_TITLE, self._tr(user_id, f"🧩 الخدمة: {app}\n⏳ جاري تحميل الصفحة...", f"🧩 Service: {app}\n⏳ Loading page..."), "traffic_menu", user_id)
             self._run_async(self.show_traffic_for_app, chat_id, message_id, user_id, app, page, False, rev)
             return
 
@@ -3588,7 +3610,6 @@ class PanelBot:
             except Exception:
                 page = 1
             rev = self.user_view_rev.get(user_id, 0)
-            self._show_loading(chat_id, message_id, TRAFFIC_TITLE, self._tr(user_id, "⏳ جاري تحميل المنصات...", "⏳ Loading platforms..."), "main_menu", user_id)
             self._run_async(self.show_platforms, chat_id, user_id, message_id, True, page, False, rev)
             return
 
@@ -3640,7 +3661,6 @@ class PanelBot:
             except Exception:
                 page = 1
             rev = self.user_view_rev.get(user_id, 0)
-            self._show_loading(chat_id, message_id, NUMBERS_TITLE, self._tr(user_id, "⏳ جاري تحميل الصفحة...", "⏳ Loading page..."), "numbers_menu", user_id)
             account_name = self.user_numbers_view_account.get(user_id)
             self._run_async(self.show_numbers, chat_id, message_id, user_id, page, False, account_name, rev)
             return

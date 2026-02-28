@@ -120,6 +120,17 @@ def _range_limit_total() -> int:
     return max(50, value)
 
 
+def _accounts_limit_total() -> int:
+    raw = str(os.getenv("BOT_ACCOUNTS_LIMIT", "")).strip()
+    if not raw:
+        return 0
+    try:
+        value = int(raw)
+    except Exception:
+        return 0
+    return max(0, value)
+
+
 def is_real_value(value: str | None) -> bool:
     v = str(value or "").strip()
     if not v:
@@ -691,6 +702,17 @@ def add_account(name: str, email: str, password: str, enabled: bool) -> None:
     if not str(password or "").strip():
         err("password is required")
         return
+    limit = _accounts_limit_total()
+    if limit > 0:
+        email_key = str(email).strip().lower()
+        existing_emails = {
+            str(x.get("email", "")).strip().lower()
+            for x in rows
+            if isinstance(x, dict) and str(x.get("email", "")).strip()
+        }
+        if email_key not in existing_emails and len(existing_emails) >= limit:
+            err(f"accounts limit reached (limit={limit}, used={len(existing_emails)}, remaining=0)")
+            return
     rows = [x for x in rows if not (x.get("email") == email)]
     rows.append({"name": name, "email": email, "password": password, "enabled": enabled})
     save_json(ACCOUNTS_FILE, rows)

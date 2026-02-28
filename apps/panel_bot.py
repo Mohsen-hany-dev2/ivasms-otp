@@ -590,16 +590,52 @@ class PanelBot:
         self.save_json(ACCOUNTS_FILE, rows)
         self.request_bot_restart()
 
-    def get_instance_accounts_limit(self) -> int:
-        # Per-bot limit from supervisor env. 0 means unlimited.
-        raw = str(os.getenv("BOT_ACCOUNTS_LIMIT", "")).strip()
-        if not raw:
+    def _managed_limit_from_main_runtime(self) -> int:
+        # Fallback: read this bot limit directly from main runtime_config managed_bots.
+        token_here = str(self.bot_token or "").strip()
+        if not token_here:
+            return 0
+        db_path = BASE_DIR / "data" / "storage.db"
+        if not db_path.exists():
             return 0
         try:
-            n = int(raw)
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            row = cur.execute("SELECT value FROM kv_store WHERE key='runtime_config'").fetchone()
+            conn.close()
+            if not row:
+                return 0
+            cfg = json.loads(str(row[0]))
+            if not isinstance(cfg, dict):
+                return 0
+            bots = cfg.get("managed_bots")
+            if not isinstance(bots, list):
+                return 0
+            for bot in bots:
+                if not isinstance(bot, dict):
+                    continue
+                token = str(bot.get("bot_token", "") or bot.get("token", "")).strip()
+                if token != token_here:
+                    continue
+                try:
+                    return max(0, int(str(bot.get("accounts_limit", 0) or "0").strip() or "0"))
+                except Exception:
+                    return 0
         except Exception:
             return 0
-        return max(0, n)
+        return 0
+
+    def get_instance_accounts_limit(self) -> int:
+        # Per-bot limit. Prefer supervisor env; fallback to main runtime config.
+        raw = str(os.getenv("BOT_ACCOUNTS_LIMIT", "")).strip()
+        if raw:
+            try:
+                n = int(raw)
+            except Exception:
+                n = 0
+            if n > 0:
+                return n
+        return self._managed_limit_from_main_runtime()
 
     def check_accounts_capacity(self, incoming_rows: list[dict[str, Any]]) -> tuple[bool, int, int]:
         # Returns: (is_allowed, new_unique_count, remaining_slots_before_add)
@@ -3531,13 +3567,30 @@ class PanelBot:
 
         if data == "acc_add":
             self.set_state(user_id, "wait_add_account")
+            limit = self.get_instance_accounts_limit()
+            accounts_count = len(
+                {
+                    str(x.get("email", "")).strip().lower()
+                    for x in self.load_accounts()
+                    if str(x.get("email", "")).strip()
+                }
+            )
+            limit_note = ""
+            if limit > 0:
+                remaining = max(0, limit - accounts_count)
+                limit_note = "\n" + self._tr(
+                    user_id,
+                    f"حد الحسابات: {limit} | المستخدم: {accounts_count} | المتبقي: {remaining}",
+                    f"Accounts limit: {limit} | used: {accounts_count} | remaining: {remaining}",
+                )
             self.send_text(
                 chat_id,
                 self._tr(
                     user_id,
                     "ارسل الحساب/الحسابات بهذا الشكل:\nname,email,password\n- يمكن ارسال أكثر من سطر\n- أو ارسل ملف txt/csv/json بنفس التنسيق",
                     "Send account(s) in this format:\nname,email,password\n- You can send multiple lines\n- Or send txt/csv/json file with same format",
-                ),
+                )
+                + limit_note,
             )
             return
 

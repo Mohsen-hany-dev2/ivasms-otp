@@ -61,7 +61,9 @@ def build_specs() -> dict[str, tuple[str, tuple[str, ...], dict[str, str]]]:
             continue
         if not bool(row.get("enabled", True)):
             continue
-        token = str(row.get("bot_token", "")).strip()
+        # Backward compatible with old managed bot schema:
+        # token/storage and new bot_token/storage_mode.
+        token = str(row.get("bot_token", "") or row.get("token", "")).strip()
         if not token or ":" not in token:
             continue
         bot_id = str(row.get("id", "")).strip() or str(idx)

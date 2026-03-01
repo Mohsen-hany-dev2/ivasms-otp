@@ -558,6 +558,12 @@ def runtime_api_session_token(default_value: str) -> str:
     return value or str(default_value or "").strip()
 
 
+def runtime_api_key(default_value: str) -> str:
+    cfg = load_runtime_config()
+    value = str(cfg.get("api_key", "")).strip()
+    return value or str(default_value or "").strip()
+
+
 def runtime_bot_limit(default_value: int) -> int:
     cfg = load_runtime_config()
     raw = str(cfg.get("bot_limit", default_value)).strip()
@@ -615,6 +621,7 @@ def cache_set_token(cache: dict, account_name: str, token: str) -> None:
 
 def get_or_refresh_account_token(
     api_base: str,
+    api_key: str,
     account: dict[str, str],
     account_tokens: dict[str, str],
     token_cache: dict,
@@ -629,7 +636,7 @@ def get_or_refresh_account_token(
         account_tokens[name] = cached_tok
         return cached_tok
 
-    new_tok = api_login(api_base, account["email"], account["password"])
+    new_tok = api_login(api_base, api_key, account["email"], account["password"])
     if not new_tok:
         return None
     account_tokens[name] = new_tok
@@ -737,6 +744,13 @@ def _classify_request_error(exc: Exception) -> str:
     return "network_error"
 
 
+def _api_headers(api_key: str) -> dict[str, str]:
+    key = str(api_key or "").strip()
+    if not key:
+        return {}
+    return {"X-API-Key": key}
+
+
 def check_api_health(api_base: str) -> bool:
     url = f"{api_base}/api/v1/health"
     try:
@@ -766,10 +780,10 @@ def check_api_health(api_base: str) -> bool:
     return True
 
 
-def api_login(api_base: str, email: str, password: str) -> str | None:
+def api_login(api_base: str, api_key: str, email: str, password: str) -> str | None:
     url = f"{api_base}/api/v1/auth/login"
     try:
-        r = requests.post(url, json={"email": email, "password": password}, timeout=90)
+        r = requests.post(url, json={"email": email, "password": password}, headers=_api_headers(api_key), timeout=90)
     except requests.RequestException as exc:
         reason = _classify_request_error(exc)
         key = f"login_req_{email}_{reason}"
@@ -807,7 +821,7 @@ def api_login(api_base: str, email: str, password: str) -> str | None:
     return None
 
 
-def fetch_messages(api_base: str, api_token: str, start_date: str, limit: int) -> list[dict]:
+def fetch_messages(api_base: str, api_key: str, api_token: str, start_date: str, limit: int) -> list[dict]:
     endpoint = f"{api_base}/api/v1/biring/code"
     try:
         fetch_timeout = int(str(os.getenv("API_FETCH_TIMEOUT_SEC", str(DEFAULT_FETCH_TIMEOUT_SECONDS))).strip() or str(DEFAULT_FETCH_TIMEOUT_SECONDS))
@@ -815,7 +829,12 @@ def fetch_messages(api_base: str, api_token: str, start_date: str, limit: int) -
         fetch_timeout = DEFAULT_FETCH_TIMEOUT_SECONDS
     fetch_timeout = max(15, min(300, fetch_timeout))
     try:
-        r = requests.post(endpoint, json={"token": api_token, "start_date": start_date}, timeout=fetch_timeout)
+        r = requests.post(
+            endpoint,
+            json={"token": api_token, "start_date": start_date},
+            headers=_api_headers(api_key),
+            timeout=fetch_timeout,
+        )
     except requests.RequestException as exc:
         reason = _classify_request_error(exc)
         raise RuntimeError(f"request failed ({reason}): {exc}") from exc
@@ -831,8 +850,18 @@ def fetch_messages(api_base: str, api_token: str, start_date: str, limit: int) -
     return rows[:limit]
 
 
-def run_loop(start_date: str, api_base: str, api_token: str, tg_token: str, target_groups: list[dict[str, str]], limit: int, once: bool) -> None:
+def run_loop(
+    start_date: str,
+    api_base: str,
+    api_key: str,
+    api_token: str,
+    tg_token: str,
+    target_groups: list[dict[str, str]],
+    limit: int,
+    once: bool,
+) -> None:
     current_api_base = runtime_api_base(api_base)
+    current_api_key = runtime_api_key(api_key)
     current_api_token = runtime_api_session_token(api_token)
     current_start_date = runtime_start_date(start_date)
     current_limit = runtime_bot_limit(limit)
@@ -863,7 +892,7 @@ def run_loop(start_date: str, api_base: str, api_token: str, tg_token: str, targ
     last_group_send_at: dict[str, float] = {}
     invalid_groups: set[str] = set()
     for acc in accounts:
-        tok = get_or_refresh_account_token(current_api_base, acc, account_tokens, token_cache)
+        tok = get_or_refresh_account_token(current_api_base, current_api_key, acc, account_tokens, token_cache)
         if tok:
             logger.info("account ready | account=%s", acc["name"])
         else:
@@ -882,6 +911,7 @@ def run_loop(start_date: str, api_base: str, api_token: str, tg_token: str, targ
         if latest_marker and latest_marker != update_marker:
             update_marker = latest_marker
             current_api_base = runtime_api_base(current_api_base)
+            current_api_key = runtime_api_key(current_api_key)
             current_api_token = runtime_api_session_token(current_api_token)
             current_start_date = runtime_start_date(current_start_date)
             current_limit = runtime_bot_limit(current_limit)
@@ -951,7 +981,7 @@ def run_loop(start_date: str, api_base: str, api_token: str, tg_token: str, targ
         account_jobs: list[tuple[str, dict[str, str], str]] = []
         for acc in accounts:
             name = acc["name"]
-            tok = get_or_refresh_account_token(current_api_base, acc, account_tokens, token_cache)
+            tok = get_or_refresh_account_token(current_api_base, current_api_key, acc, account_tokens, token_cache)
             if tok:
                 account_jobs.append((name, acc, tok))
 
@@ -961,10 +991,10 @@ def run_loop(start_date: str, api_base: str, api_token: str, tg_token: str, targ
             with ThreadPoolExecutor(max_workers=max_workers) as pool:
                 futures: dict = {}
                 if current_api_token:
-                    fut = pool.submit(fetch_messages, current_api_base, current_api_token, current_start_date, current_limit)
+                    fut = pool.submit(fetch_messages, current_api_base, current_api_key, current_api_token, current_start_date, current_limit)
                     futures[fut] = ("api_token", None, None)
                 for name, acc, tok in account_jobs:
-                    fut = pool.submit(fetch_messages, current_api_base, tok, current_start_date, current_limit)
+                    fut = pool.submit(fetch_messages, current_api_base, current_api_key, tok, current_start_date, current_limit)
                     futures[fut] = ("account", name, acc)
 
                 for fut in as_completed(futures):
@@ -979,7 +1009,7 @@ def run_loop(start_date: str, api_base: str, api_token: str, tg_token: str, targ
                         if not acc or not name:
                             continue
                         # Retry once with fresh login token when account token is stale.
-                        new_tok = api_login(current_api_base, acc["email"], acc["password"])
+                        new_tok = api_login(current_api_base, current_api_key, acc["email"], acc["password"])
                         if not new_tok:
                             logger.warning("account fetch failed | account=%s | error=%s", name, _short_text(exc))
                             continue
@@ -987,7 +1017,7 @@ def run_loop(start_date: str, api_base: str, api_token: str, tg_token: str, targ
                         cache_set_token(token_cache, name, new_tok)
                         save_token_cache(token_cache)
                         try:
-                            all_rows.extend(fetch_messages(current_api_base, new_tok, current_start_date, current_limit))
+                            all_rows.extend(fetch_messages(current_api_base, current_api_key, new_tok, current_start_date, current_limit))
                         except Exception as retry_exc:
                             logger.warning(
                                 "account fetch retry failed | account=%s | error=%s",
@@ -1135,6 +1165,7 @@ def main() -> None:
     load_dotenv(BASE_DIR / ".env")
     setup_logging()
     default_api = runtime_api_base(os.getenv("API_BASE_URL", "").strip())
+    default_api_key = runtime_api_key(os.getenv("API_KEY", "").strip())
     default_start = runtime_start_date(os.getenv("API_START_DATE", "2025-01-01").strip())
     default_api_token = runtime_api_session_token(os.getenv("API_SESSION_TOKEN", "").strip())
     default_tg_token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -1143,6 +1174,7 @@ def main() -> None:
     print("=== NumPlus Telegram Bot Client ===")
     if args.no_input:
         api_base = (default_api if is_real_value(default_api) else "http://127.0.0.1:8000").rstrip("/")
+        api_key = default_api_key.strip()
         tg_token = default_tg_token.strip()
         target_groups = load_groups()
         accounts = load_accounts()
@@ -1155,6 +1187,7 @@ def main() -> None:
             limit = 30
     else:
         api_base = runtime_api_base(default_api if is_real_value(default_api) else "http://127.0.0.1:8000").rstrip("/")
+        api_key = runtime_api_key(default_api_key).strip()
         tg_token = ask_missing("Telegram bot token", default_tg_token)
         target_groups = load_groups()
 
@@ -1175,7 +1208,7 @@ def main() -> None:
     check_api_health(api_base)
 
     try:
-        run_loop(start_date, api_base, api_token, tg_token, target_groups, limit, args.once)
+        run_loop(start_date, api_base, api_key, api_token, tg_token, target_groups, limit, args.once)
     except KeyboardInterrupt:
         print("\nStopped by user.")
 

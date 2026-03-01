@@ -150,6 +150,17 @@ def env_value(key: str, fallback: str = "") -> str:
     return fallback.strip()
 
 
+def api_key_value() -> str:
+    return env_value("API_KEY", "")
+
+
+def api_headers() -> dict[str, str]:
+    key = api_key_value()
+    if not key:
+        return {}
+    return {"X-API-Key": key}
+
+
 def load_active_accounts() -> list[dict]:
     rows = load_json(ACCOUNTS_FILE, [])
     out: list[dict] = []
@@ -187,7 +198,7 @@ def _extract_login_token(payload: object) -> str:
 def api_login(api_base: str, email: str, password: str) -> tuple[str | None, str]:
     url = f"{api_base.rstrip('/')}/api/v1/auth/login"
     try:
-        r = requests.post(url, json={"email": email, "password": password}, timeout=60)
+        r = requests.post(url, json={"email": email, "password": password}, headers=api_headers(), timeout=60)
     except requests.RequestException as exc:
         return None, str(exc)
     payload: object
@@ -211,7 +222,7 @@ def api_login(api_base: str, email: str, password: str) -> tuple[str | None, str
 def api_post(api_base: str, path: str, body: dict, timeout: int = 60) -> tuple[bool, object, str]:
     url = f"{api_base.rstrip('/')}{path}"
     try:
-        r = requests.post(url, json=body, timeout=timeout)
+        r = requests.post(url, json=body, headers=api_headers(), timeout=timeout)
     except requests.RequestException as exc:
         return False, None, str(exc)
     try:
@@ -414,7 +425,12 @@ def add_range_command(api_base: str, range_name: str, count: int) -> None:
         success_calls = 0
         last_err = ""
         for idx in range(1, calls_needed + 1):
-            ok_req, payload, req_err = api_post(api_base, "/api/v1/order/range", {"token": token, "range_name": value}, timeout=90)
+            ok_req, payload, req_err = api_post(
+                api_base,
+                "/api/v1/order/range",
+                {"token": token, "range_name": value, "count": 50},
+                timeout=90,
+            )
             if not ok_req:
                 last_err = req_err
                 err(f"{name}: request failed at batch {idx}/{calls_needed} ({req_err})")

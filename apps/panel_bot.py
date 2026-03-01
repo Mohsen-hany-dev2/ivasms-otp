@@ -1176,13 +1176,19 @@ class PanelBot:
         return True, payload, ""
 
     def api_login(self, email: str, password: str) -> tuple[str | None, str]:
-        ok, payload, err = self.api_post("/api/v1/auth/login", {"email": email, "password": password}, timeout=60)
-        if not ok:
-            return None, err
-        token = self._extract_token(payload)
-        if token:
-            return token, ""
-        return None, "login succeeded without token"
+        last_err = ""
+        for attempt in range(1, 4):
+            ok, payload, err = self.api_post("/api/v1/auth/login", {"email": email, "password": password}, timeout=60)
+            if ok:
+                token = self._extract_token(payload)
+                if token:
+                    return token, ""
+                last_err = "login succeeded without token"
+            else:
+                last_err = err
+            if attempt < 3:
+                time.sleep(0.6 * attempt)
+        return None, last_err or "login failed"
 
     def active_accounts(self) -> list[dict[str, Any]]:
         return [x for x in self.load_accounts() if bool(x.get("enabled", True))]
@@ -2413,16 +2419,24 @@ class PanelBot:
         if operation_id:
             self._update_operation(operation_id, done=max(0, int(progress_base)) + max(total_success, actual_added), force_render=True)
 
-        return "\n".join(
-            [
-                self._tr(user_id, f"تم تنفيذ طلب الرينج: {range_name}", f"Range request completed: {range_name}"),
-                self._tr(user_id, f"الإجمالي الناجح: {total_success}", f"Total success: {total_success}"),
-                self._tr(user_id, f"المضاف فعليًا في الرينج: {actual_added}", f"Actually added in range: {actual_added}"),
-                *summary,
-                self._tr(user_id, f"الموجود الآن في الرينج: {existing_after}", f"Current existing in range: {existing_after}"),
-                self._tr(user_id, f"المتبقي من الحد: {max(0, new_remaining)}", f"Remaining limit: {max(0, new_remaining)}"),
-            ]
-        )
+        effective_success = max(0, max(total_success, actual_added))
+        lines = [
+            self._tr(user_id, f"تم تنفيذ طلب الرينج: {range_name}", f"Range request completed: {range_name}"),
+            self._tr(user_id, f"الإجمالي الناجح: {effective_success}", f"Total success: {effective_success}"),
+            self._tr(user_id, f"المضاف فعليًا في الرينج: {actual_added}", f"Actually added in range: {actual_added}"),
+            *summary,
+            self._tr(user_id, f"الموجود الآن في الرينج: {existing_after}", f"Current existing in range: {existing_after}"),
+            self._tr(user_id, f"المتبقي من الحد: {max(0, new_remaining)}", f"Remaining limit: {max(0, new_remaining)}"),
+        ]
+        if actual_added > total_success:
+            lines.append(
+                self._tr(
+                    user_id,
+                    f"ملاحظة: تمت مزامنة النجاح من النتائج الفعلية (+{actual_added - total_success}).",
+                    f"Note: success was reconciled from live results (+{actual_added - total_success}).",
+                )
+            )
+        return "\n".join(lines)
 
     def delete_numbers(self, user_id: int, items: list[str], operation_id: str | None = None) -> str:
         cleaned = [x.strip() for x in items if str(x).strip()]

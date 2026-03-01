@@ -99,6 +99,7 @@ class PanelBot:
         self.bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
         self.api_base = os.getenv("API_BASE_URL", "").strip().rstrip("/")
         self.api_session_token = os.getenv("API_SESSION_TOKEN", "").strip()
+        self.api_key = os.getenv("API_KEY", "").strip()
         self.poll_interval = 2
         self.user_state: dict[int, dict[str, Any]] = {}
         self.last_update_id = 0
@@ -218,6 +219,8 @@ class PanelBot:
             data["api_base_url"] = os.getenv("API_BASE_URL", "").strip().rstrip("/")
         if "api_session_token" not in data:
             data["api_session_token"] = os.getenv("API_SESSION_TOKEN", "").strip()
+        if "api_key" not in data:
+            data["api_key"] = os.getenv("API_KEY", "").strip()
         if "bot_limit" not in data:
             data["bot_limit"] = int(str(os.getenv("BOT_LIMIT", "30") or "30").strip() or "30")
         if not isinstance(data.get("panel_admin_ids"), list):
@@ -260,6 +263,7 @@ class PanelBot:
         session_tok = str(cfg.get("api_session_token", "")).strip()
         if session_tok:
             self.api_session_token = session_tok
+        self.api_key = str(cfg.get("api_key", "")).strip()
         admins: set[int] = set(DEFAULT_ADMIN_IDS) | self._env_admin_ids()
         runtime_admins = cfg.get("panel_admin_ids")
         if isinstance(runtime_admins, list):
@@ -273,6 +277,32 @@ class PanelBot:
         cfg = self._load_runtime_cfg()
         value = str(cfg.get("api_base_url", "")).strip().rstrip("/")
         return value or self.api_base
+
+    def get_runtime_api_key(self) -> str:
+        cfg = self._load_runtime_cfg()
+        value = str(cfg.get("api_key", "")).strip()
+        return value or str(self.api_key or "").strip()
+
+    def set_runtime_api_key(self, value: str) -> bool:
+        v = str(value or "").strip()
+        if len(v) < 8:
+            return False
+        cfg = self._load_runtime_cfg()
+        cfg["api_key"] = v
+        self._save_runtime_cfg(cfg)
+        self.refresh_runtime_settings()
+        return True
+
+    def _masked_api_key(self, value: str) -> str:
+        v = str(value or "").strip()
+        if not v:
+            return "-"
+        if len(v) <= 8:
+            return "*" * len(v)
+        return f"{v[:4]}{'*' * (len(v) - 8)}{v[-4:]}"
+
+    def _has_api_key(self) -> bool:
+        return bool(self.get_runtime_api_key().strip())
 
     def set_runtime_api_base(self, value: str) -> bool:
         v = str(value or "").strip().rstrip("/")
@@ -1148,9 +1178,13 @@ class PanelBot:
         return ""
 
     def api_post(self, path: str, body: dict[str, Any], timeout: int = 60) -> tuple[bool, Any, str]:
+        api_key = str(self.get_runtime_api_key() or "").strip()
+        if not api_key:
+            return False, None, "api key missing"
         url = f"{self.api_base}{path}"
+        headers = {"X-API-Key": api_key, "Authorization": f"Bearer {api_key}"}
         try:
-            r = requests.post(url, json=body, timeout=timeout)
+            r = requests.post(url, json=body, headers=headers, timeout=timeout)
         except requests.RequestException as exc:
             return False, None, str(exc)
 
@@ -1410,6 +1444,7 @@ class PanelBot:
         total = max(0, int(op.get("total", 0) or 0))
         done = max(0, int(op.get("done", 0) or 0))
         attempted = max(0, int(op.get("attempted", 0) or 0))
+        failed = max(0, attempted - done)
         remaining = max(0, total - done)
         started_at = float(op.get("started_at", 0.0) or 0.0)
         elapsed = max(0, int(time.time() - started_at)) if started_at > 0 else 0
@@ -1428,6 +1463,7 @@ class PanelBot:
             self._tr(user_id, f"هدف المهمة: {target}", f"Target: {target}"),
             self._tr(user_id, f"التقدم: {done}/{total}", f"Progress: {done}/{total}"),
             self._tr(user_id, f"المحاولات: {attempted}/{total}", f"Attempts: {attempted}/{total}"),
+            self._tr(user_id, f"فشل: {failed}", f"Failed: {failed}"),
             self._tr(user_id, f"المتبقي: {remaining}", f"Remaining: {remaining}"),
             self._tr(user_id, f"المدة: {mm:02d}:{ss:02d}", f"Elapsed: {mm:02d}:{ss:02d}"),
             self._tr(user_id, f"الحالة: {status_label}", f"Status: {status_label}"),
@@ -1664,6 +1700,60 @@ class PanelBot:
                 buttons.append(self._btn(f"{marker} {name} {done}/{total}", callback_data=f"op_show:{op_id}", style="primary"))
         kb = self._pattern_rows(buttons, back_callback="main_menu", back_text=self._tr(user_id, "رجوع", "Back"))
         self.edit_text(chat_id, message_id, "\n".join(lines), kb)
+
+    def _is_api_callback(self, data: str) -> bool:
+        exact = {
+            "show_platforms",
+            "traffic_menu",
+            "balances",
+            "stats",
+            "numbers_show",
+            "numbers_request",
+            "numbers_delete",
+            "numbers_export_menu",
+            "ranges_menu",
+            "ranges_show",
+            "numbers_delete_all_confirm",
+            "numbers_delete_all_yes",
+            "numbers_delete_manual",
+        }
+        prefixes = (
+            "traffic_app:",
+            "numbers_req_",
+            "numbers_scope_",
+            "numbers_export_",
+            "export_",
+            "numbers_page:",
+            "ranges_page:",
+            "platforms_page:",
+            "numbers_show_",
+        )
+        if data in exact:
+            return True
+        return any(data.startswith(p) for p in prefixes)
+
+    def _redirect_to_api_key(self, chat_id: int | str, message_id: int, user_id: int) -> None:
+        self.clear_state(user_id)
+        text = (
+            self._q(self._tr(user_id, "༺═════⇓ الإعدادات ⇓═════༻", "༺═════⇓ Settings ⇓═════༻"))
+            + "\n"
+            + self._tr(
+                user_id,
+                "ليس لديك صلاحية لي استخدام الـ API.\nقم بتعيين API Key أولاً.",
+                "You do not have permission to use API.\nSet API Key first.",
+            )
+            + "\n"
+            + self._tr(
+                user_id,
+                f"🔐 API Key: {self._masked_api_key(self.get_runtime_api_key())}",
+                f"🔐 API Key: {self._masked_api_key(self.get_runtime_api_key())}",
+            )
+        )
+        kb = [
+            [self._btn(self._tr(user_id, "🔐 تعيين API Key", "🔐 Set API Key"), callback_data="var_set_api_key", style="success")],
+            [self._btn(self._tr(user_id, "رجوع", "Back"), callback_data="vars_menu", style="primary")],
+        ]
+        self.edit_text(chat_id, message_id, text, kb)
 
     def kb_numbers_scope(self, user_id: int) -> list[list[dict[str, Any]]]:
         buttons = [
@@ -1940,11 +2030,13 @@ class PanelBot:
             buttons = [
                 self._btn(self._tr(user_id, "🗓️ Start Date", "🗓️ Start Date"), callback_data="var_startdate_menu", style="primary"),
                 self._btn(self._tr(user_id, "🌐 تعيين API URL", "🌐 Set API URL"), callback_data="var_set_api_url", style="primary"),
+                self._btn(self._tr(user_id, "🔐 API Key", "🔐 API Key"), callback_data="var_set_api_key", style="success"),
             ]
             return self._pattern_rows(buttons, back_callback="main_menu", back_text=self._tr(user_id, "رجوع", "Back"))
 
         buttons = [
             self._btn(self._tr(user_id, "🌐 API URL", "🌐 API URL"), callback_data="var_set_api_url", style="primary"),
+            self._btn(self._tr(user_id, "🔐 API Key", "🔐 API Key"), callback_data="var_set_api_key", style="success"),
             self._btn(self._tr(user_id, "🗓️ Start Date", "🗓️ Start Date"), callback_data="var_startdate_menu", style="primary"),
             self._btn(self._tr(user_id, "📦 BOT LIMIT", "📦 BOT LIMIT"), callback_data="var_set_bot_limit", style="primary"),
             self._btn(self._tr(user_id, "👮 إدارة الأدمن", "👮 Admin Management"), callback_data="var_admins_menu", style="primary"),
@@ -2320,6 +2412,7 @@ class PanelBot:
         total_success = 0
         cancelled = False
         last_live_sync_at = 0.0
+        api_attempted_total = 0
 
         for name, token in targets:
             success_calls = 0
@@ -2331,10 +2424,27 @@ class PanelBot:
                 if operation_id and self._is_operation_cancelled(operation_id):
                     cancelled = True
                     break
-                ok, _payload, req_err = self.api_post("/api/v1/order/range", {"token": token, "range_name": range_name}, timeout=90)
+                ok, _payload, req_err = self.api_post(
+                    "/api/v1/order/range",
+                    {"token": token, "range_name": range_name, "count": 50},
+                    timeout=90,
+                )
+                api_attempted_total += 50
                 if operation_id:
                     attempted = self._get_operation_attempted(operation_id) + 50
-                    self._update_operation(operation_id, attempted=attempted, note=self._tr(user_id, f"الحساب: {name} | الطلب {_idx}/{account_calls}", f"Account: {name} | batch {_idx}/{account_calls}"))
+                    current_api_success = max(0, int(progress_base)) + total_success + (success_calls * 50) + (50 if ok else 0)
+                    current_api_failed = max(0, attempted - current_api_success)
+                    status_text = self._tr(user_id, "نجاح ✅", "OK ✅") if ok else self._tr(user_id, "فشل ❌", "Failed ❌")
+                    self._update_operation(
+                        operation_id,
+                        attempted=attempted,
+                        done=current_api_success,
+                        note=self._tr(
+                            user_id,
+                            f"الحساب: {name} | الطلب {_idx}/{account_calls} | {status_text} | فشل: {current_api_failed}",
+                            f"Account: {name} | batch {_idx}/{account_calls} | {status_text} | failed: {current_api_failed}",
+                        ),
+                    )
                 if ok:
                     success_calls += 1
                 else:
@@ -2401,6 +2511,15 @@ class PanelBot:
                 summary.append(
                     self._tr(user_id, f"{name}: نجاح جزئي {requested_numbers}/{expected_for_account}", f"{name}: partial success {requested_numbers}/{expected_for_account}")
                     + (self._tr(user_id, f" | خطأ: {last_err}", f" | error: {last_err}") if last_err else "")
+                )
+            if operation_id:
+                self._update_operation(
+                    operation_id,
+                    note=self._tr(
+                        user_id,
+                        f"نتائج API | محاولات: {api_attempted_total} | نجاح: {total_success}",
+                        f"API results | attempted: {api_attempted_total} | success: {total_success}",
+                    ),
                 )
             if cancelled:
                 summary.append(self._tr(user_id, "تم إيقاف العملية بطلب منك.", "Operation stopped by your request."))
@@ -2493,7 +2612,13 @@ class PanelBot:
                 return self._tr(user_id, "لم يتم العثور على IDs للأرقام المدخلة.", "No IDs found for provided numbers.") + "\n" + "\n".join(f"- {x}" for x in unresolved[:25])
             return self._tr(user_id, "لم يتم استخراج IDs صالحة للحذف.", "Could not extract valid IDs for deletion.")
         if operation_id:
-            self._update_operation(operation_id, total=len(unique_ids), done=0)
+            self._update_operation(
+                operation_id,
+                total=len(unique_ids),
+                done=0,
+                attempted=0,
+                note=self._tr(user_id, "جاري فحص وحذف الأرقام...", "Validating and deleting numbers..."),
+            )
 
         # Group IDs by owning account so deletion goes to correct account.
         by_account: dict[str, list[str]] = {}
@@ -2505,9 +2630,53 @@ class PanelBot:
         total_ok_accounts = 0
         total_removed_ids = 0
         processed_ids = 0
+        attempted_ids = 0
         details: list[str] = []
         last_err = ""
         cancelled = False
+
+        def delete_single(token: str, rid: str) -> tuple[bool, str]:
+            endpoints = ["/api/v1/numbers/remove"]
+            payloads = (
+                {"token": token, "number_id": rid},
+                {"token": token, "id": rid},
+                {"token": token, "numberId": rid},
+            )
+            last_single_err = ""
+            for ep in endpoints:
+                for body in payloads:
+                    ok_s, _payload_s, err_s = self.api_post(ep, body, timeout=90)
+                    if ok_s:
+                        return True, ""
+                    last_single_err = err_s
+            return False, last_single_err
+
+        def delete_bulk(token: str, ids_bulk: list[str]) -> tuple[bool, int, str]:
+            endpoints = ["/api/v1/numbers/remove/bulk"]
+            payloads = (
+                {"token": token, "ids": ids_bulk, "max_workers": min(8, len(ids_bulk))},
+                {"token": token, "number_ids": ids_bulk},
+                {"token": token, "numberIds": ids_bulk},
+                {"token": token, "ids": ",".join(ids_bulk)},
+            )
+            last_bulk_err = ""
+            for ep in endpoints:
+                for body in payloads:
+                    ok_b, payload_b, err_b = self.api_post(ep, body, timeout=120)
+                    if not ok_b:
+                        last_bulk_err = err_b
+                        continue
+                    removed = len(ids_bulk)
+                    if isinstance(payload_b, dict):
+                        for key in ("removed", "deleted", "success_count", "count"):
+                            if key in payload_b:
+                                try:
+                                    removed = int(str(payload_b.get(key)).strip())
+                                except Exception:
+                                    pass
+                                break
+                    return True, max(0, removed), ""
+            return False, 0, last_bulk_err
 
         for name, token in targets:
             if operation_id and self._is_operation_cancelled(operation_id):
@@ -2529,86 +2698,92 @@ class PanelBot:
             account_removed = 0
             if len(dedup_ids) == 1:
                 rid = dedup_ids[0]
-                single_ok = False
-                single_err = ""
-                for body in (
-                    {"token": token, "number_id": rid},
-                    {"token": token, "id": rid},
-                ):
-                    if operation_id and self._is_operation_cancelled(operation_id):
-                        cancelled = True
-                        break
-                    ok, _payload, err = self.api_post("/api/v1/numbers/remove", body, timeout=90)
-                    if ok:
-                        single_ok = True
-                        break
-                    single_err = err
+                if operation_id and self._is_operation_cancelled(operation_id):
+                    cancelled = True
+                    break
+                attempted_ids += 1
+                single_ok, single_err = delete_single(token, rid)
                 if cancelled:
                     break
                 if single_ok:
                     account_removed = 1
                     processed_ids += 1
                     if operation_id:
-                        self._update_operation(operation_id, done=processed_ids)
+                        self._update_operation(
+                            operation_id,
+                            attempted=attempted_ids,
+                            done=processed_ids,
+                            note=self._tr(
+                                user_id,
+                                f"الحساب: {name} | حذف فردي ✅ | فشل: {max(0, attempted_ids - processed_ids)}",
+                                f"Account: {name} | single delete ✅ | failed: {max(0, attempted_ids - processed_ids)}",
+                            ),
+                        )
                 else:
                     last_err = f"{name}: {single_err}"
+                    if operation_id:
+                        self._update_operation(
+                            operation_id,
+                            attempted=attempted_ids,
+                            done=processed_ids,
+                            note=self._tr(
+                                user_id,
+                                f"الحساب: {name} | حذف فردي ❌ | فشل: {max(0, attempted_ids - processed_ids)}",
+                                f"Account: {name} | single delete ❌ | failed: {max(0, attempted_ids - processed_ids)}",
+                            ),
+                        )
             else:
-                bulk_ok = False
-                bulk_err = ""
-                bulk_payload: Any = None
-                for body in (
-                    {"token": token, "ids": dedup_ids, "max_workers": min(8, len(dedup_ids))},
-                    {"token": token, "number_ids": dedup_ids},
-                    {"token": token, "ids": ",".join(dedup_ids)},
-                ):
-                    ok, payload, err = self.api_post("/api/v1/numbers/remove/bulk", body, timeout=120)
-                    if ok:
-                        bulk_ok = True
-                        bulk_payload = payload
-                        break
-                    bulk_err = err
+                bulk_ok, removed_bulk, bulk_err = delete_bulk(token, dedup_ids)
                 if bulk_ok:
-                    removed = len(dedup_ids)
-                    if isinstance(bulk_payload, dict):
-                        for key in ("removed", "deleted", "success_count", "count"):
-                            if key in bulk_payload:
-                                try:
-                                    removed = int(str(bulk_payload.get(key)).strip())
-                                except Exception:
-                                    pass
-                                break
-                    account_removed = max(0, removed)
+                    attempted_ids += len(dedup_ids)
+                    account_removed = max(0, int(removed_bulk))
                     processed_ids += account_removed
                     if operation_id:
-                        self._update_operation(operation_id, done=processed_ids)
+                        self._update_operation(
+                            operation_id,
+                            attempted=attempted_ids,
+                            done=processed_ids,
+                            note=self._tr(
+                                user_id,
+                                f"الحساب: {name} | حذف جماعي ✅ {account_removed}/{len(dedup_ids)} | فشل: {max(0, attempted_ids - processed_ids)}",
+                                f"Account: {name} | bulk delete ✅ {account_removed}/{len(dedup_ids)} | failed: {max(0, attempted_ids - processed_ids)}",
+                            ),
+                        )
                 else:
                     # Fallback to single remove when bulk fails.
                     for rid in dedup_ids:
                         if operation_id and self._is_operation_cancelled(operation_id):
                             cancelled = True
                             break
-                        one_ok = False
-                        one_err = ""
-                        for body_one in (
-                            {"token": token, "number_id": rid},
-                            {"token": token, "id": rid},
-                        ):
-                            ok_one, _payload_one, err_one = self.api_post(
-                                "/api/v1/numbers/remove",
-                                body_one,
-                                timeout=90,
-                            )
-                            if ok_one:
-                                one_ok = True
-                                break
-                            one_err = err_one
+                        attempted_ids += 1
+                        one_ok, one_err = delete_single(token, rid)
                         if one_ok:
                             account_removed += 1
                             processed_ids += 1
                             if operation_id:
-                                self._update_operation(operation_id, done=processed_ids)
+                                self._update_operation(
+                                    operation_id,
+                                    attempted=attempted_ids,
+                                    done=processed_ids,
+                                    note=self._tr(
+                                        user_id,
+                                        f"الحساب: {name} | حذف بديل ✅ | فشل: {max(0, attempted_ids - processed_ids)}",
+                                        f"Account: {name} | fallback delete ✅ | failed: {max(0, attempted_ids - processed_ids)}",
+                                    ),
+                                )
                         else:
                             last_err = f"{name}: {one_err or bulk_err}"
+                            if operation_id:
+                                self._update_operation(
+                                    operation_id,
+                                    attempted=attempted_ids,
+                                    done=processed_ids,
+                                    note=self._tr(
+                                        user_id,
+                                        f"الحساب: {name} | حذف بديل ❌ | فشل: {max(0, attempted_ids - processed_ids)}",
+                                        f"Account: {name} | fallback delete ❌ | failed: {max(0, attempted_ids - processed_ids)}",
+                                    ),
+                                )
                     if cancelled:
                         break
 
@@ -3045,11 +3220,13 @@ class PanelBot:
 
     def show_variables(self, chat_id: int | str, message_id: int, user_id: int) -> None:
         api_url = self.get_runtime_api_base()
+        api_key = self.get_runtime_api_key()
         start_date = self.get_runtime_start_date()
         start_date_auto = self.is_start_date_auto_today_enabled()
         lines = [
             self._q(self._tr(user_id, "༺═════⇓ الإعدادات ⇓═════༻", "༺═════⇓ Settings ⇓═════༻")),
             self._tr(user_id, f"🌐 API URL: {api_url or '-'}", f"🌐 API URL: {api_url or '-'}"),
+            self._tr(user_id, f"🔐 API Key: {self._masked_api_key(api_key)}", f"🔐 API Key: {self._masked_api_key(api_key)}"),
             self._tr(user_id, f"🗓️ Start Date: {start_date}", f"🗓️ Start Date: {start_date}"),
             self._tr(
                 user_id,
@@ -3344,6 +3521,9 @@ class PanelBot:
 
         if data == "noop":
             return
+        if data != "var_set_api_key" and self._is_api_callback(data) and not self._has_api_key():
+            self._redirect_to_api_key(chat_id, message_id, user_id)
+            return
         if data == "ops_menu":
             self._show_operations_menu(chat_id, message_id, user_id)
             return
@@ -3501,6 +3681,19 @@ class PanelBot:
                     user_id,
                     f"اكتب API URL\nالحالي: {current}",
                     f"Send API URL\nCurrent: {current}",
+                ),
+            )
+            return
+
+        if data == "var_set_api_key":
+            current = self._masked_api_key(self.get_runtime_api_key())
+            self.set_state(user_id, "wait_var_api_key")
+            self.send_text(
+                chat_id,
+                self._tr(
+                    user_id,
+                    f"اكتب API Key\nالحالي: {current}",
+                    f"Send API Key\nCurrent: {current}",
                 ),
             )
             return
@@ -4890,6 +5083,16 @@ class PanelBot:
             self.clear_state(user_id)
             self.mark_runtime_change()
             self.send_text(chat_id, self._tr(user_id, f"تم حفظ API URL: {self.get_runtime_api_base()}", f"API URL saved: {self.get_runtime_api_base()}"))
+            self.show_main(chat_id, user_id)
+            return
+
+        if mode == "wait_var_api_key":
+            if not self.set_runtime_api_key(text):
+                self.send_text(chat_id, self._tr(user_id, "API Key غير صالح (الحد الأدنى 8 أحرف).", "Invalid API Key (minimum 8 chars)."))
+                return
+            self.clear_state(user_id)
+            self.mark_runtime_change()
+            self.send_text(chat_id, self._tr(user_id, "تم حفظ API Key بنجاح.", "API Key saved successfully."))
             self.show_main(chat_id, user_id)
             return
 

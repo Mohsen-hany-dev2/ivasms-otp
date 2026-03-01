@@ -239,7 +239,6 @@ class PanelBot:
     def _save_runtime_cfg(self, cfg: dict[str, Any]) -> None:
         now = self._now_marker()
         cfg["updated_at"] = now
-        cfg["bot_restart_requested_at"] = now
         self.save_json(RUNTIME_CONFIG_FILE, cfg)
 
     def request_bot_restart(self) -> None:
@@ -677,7 +676,12 @@ class PanelBot:
         self.save_json(RUNTIME_CONFIG_FILE, cfg)
 
     def mark_runtime_change(self) -> None:
-        # Unified marker update for any runtime-affecting change.
+        # Hot reload only (no full process restart).
+        self.request_messages_refresh()
+        self.refresh_runtime_settings()
+
+    def mark_process_restart_change(self) -> None:
+        # Explicit full restart for topology/process-level changes only.
         self.request_bot_restart()
         self.request_messages_refresh()
 
@@ -710,7 +714,7 @@ class PanelBot:
 
     def save_accounts(self, rows: list[dict[str, Any]]) -> None:
         self.save_json(ACCOUNTS_FILE, rows)
-        self.request_bot_restart()
+        self.request_messages_refresh()
 
     def _managed_limit_from_main_runtime(self) -> int:
         # Fallback: read this bot limit directly from main runtime_config managed_bots.
@@ -805,7 +809,7 @@ class PanelBot:
 
     def save_groups(self, rows: list[dict[str, Any]]) -> None:
         self.save_json(GROUPS_FILE, rows)
-        self.request_bot_restart()
+        self.request_messages_refresh()
 
     def collect_managed_bots_groups(self) -> list[dict[str, str]]:
         rows = self.load_managed_bots()
@@ -3898,7 +3902,7 @@ class PanelBot:
                 self.answer_callback(callback_id, self._tr(user_id, "ID غير صالح.", "Invalid ID."))
                 return
             if self.remove_managed_bot_admin(bot_id, int(aid)):
-                self.mark_runtime_change()
+                self.mark_process_restart_change()
                 self.answer_callback(callback_id, self._tr(user_id, "تم حذف الأدمن.", "Admin deleted."))
             else:
                 self.answer_callback(callback_id, self._tr(user_id, "لم يتم حذف الأدمن.", "Admin was not deleted."))
@@ -4036,7 +4040,7 @@ class PanelBot:
             bot_name = str((st.get("data") or {}).get("bot_name") or "").strip()
             self.upsert_managed_bot(token, storage, user_id, username, bot_name)
             self.clear_state(user_id)
-            self.mark_runtime_change()
+            self.mark_process_restart_change()
             self.send_text(
                 chat_id,
                 self._tr(
@@ -4098,7 +4102,7 @@ class PanelBot:
             if not self.delete_managed_bot_by_id(bot_id):
                 self.answer_callback(callback_id, self._tr(user_id, "فشل الحذف أو البوت غير موجود.", "Delete failed or bot not found."))
                 return
-            self.mark_runtime_change()
+            self.mark_process_restart_change()
             self.answer_callback(callback_id, self._tr(user_id, "تم حذف البوت.", "Bot deleted."))
             rows = self.load_managed_bots()
             lines = [self._q(self._tr(user_id, "༺═════⇓ إدارة البوتات ⇓═════༻", "༺═════⇓ Bots Management ⇓═════༻"))]
@@ -4281,7 +4285,7 @@ class PanelBot:
             if not self.has_full_vars_access(user_id):
                 self.answer_callback(callback_id, self._tr(user_id, "غير متاح.", "Not allowed."))
                 return
-            self.mark_runtime_change()
+            self.mark_process_restart_change()
             self.answer_callback(callback_id, self._tr(user_id, "تم طلب إعادة تشغيل البوت.", "Bot restart requested."))
             self.show_variables(chat_id, message_id, user_id)
             return
@@ -5207,7 +5211,7 @@ class PanelBot:
                 self.send_text(chat_id, self._tr(user_id, "فشل تحديث الحد.", "Failed to update limit."))
                 return
             self.clear_state(user_id)
-            self.mark_runtime_change()
+            self.mark_process_restart_change()
             self.send_text(
                 chat_id,
                 self._tr(
@@ -5230,7 +5234,7 @@ class PanelBot:
                 self.send_text(chat_id, self._tr(user_id, "فشل إضافة الأدمن للبوت.", "Failed to add admin to bot."))
                 return
             self.clear_state(user_id)
-            self.mark_runtime_change()
+            self.mark_process_restart_change()
             self.send_text(
                 chat_id,
                 self._tr(

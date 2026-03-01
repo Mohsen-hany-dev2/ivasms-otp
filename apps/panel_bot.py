@@ -121,6 +121,8 @@ class PanelBot:
         self.op_stop_event = threading.Event()
         self.op_ticker_thread = threading.Thread(target=self._operations_ticker_loop, daemon=True)
         self.op_ticker_thread.start()
+        self.task_lock = threading.Lock()
+        self.active_task_signatures: set[tuple[int, str]] = set()
 
         if not self.bot_token:
             raise RuntimeError("TELEGRAM_BOT_TOKEN is missing in .env")
@@ -1032,12 +1034,27 @@ class PanelBot:
             plain_body["reply_markup"] = {"inline_keyboard": self._sanitize_keyboard(keyboard)}
         self.tg_api("sendMessage", plain_body)
 
-    def edit_text(self, chat_id: int | str, message_id: int, text: str, keyboard: list[list[dict[str, Any]]] | None = None) -> None:
+    def _is_tg_not_modified(self, response: dict[str, Any] | Any) -> bool:
+        if not isinstance(response, dict):
+            return False
+        desc = str(response.get("description") or response.get("error") or "").strip().lower()
+        return "message is not modified" in desc
+
+    def edit_text_strict(
+        self,
+        chat_id: int | str,
+        message_id: int,
+        text: str,
+        keyboard: list[list[dict[str, Any]]] | None = None,
+    ) -> bool:
+        if int(message_id or 0) <= 0:
+            return False
         padded_text = self._pad_text_for_keyboard(text, keyboard)
         formatted = self._format_text(padded_text)
+
         body: dict[str, Any] = {
             "chat_id": chat_id,
-            "message_id": message_id,
+            "message_id": int(message_id),
             "text": formatted,
             "parse_mode": "HTML",
             "disable_web_page_preview": True,
@@ -1045,30 +1062,37 @@ class PanelBot:
         if keyboard is not None:
             body["reply_markup"] = {"inline_keyboard": keyboard}
         result = self.tg_api("editMessageText", body)
-        if not result.get("ok"):
-            # Retry edit without parse mode and with sanitized keyboard.
-            body_fallback: dict[str, Any] = {
-                "chat_id": chat_id,
-                "message_id": message_id,
-                "text": formatted,
-                "parse_mode": "HTML",
-                "disable_web_page_preview": True,
-            }
-            if keyboard is not None:
-                body_fallback["reply_markup"] = {"inline_keyboard": self._sanitize_keyboard(keyboard)}
-            retry = self.tg_api("editMessageText", body_fallback)
-            if not retry.get("ok"):
-                plain_body: dict[str, Any] = {
-                    "chat_id": chat_id,
-                    "message_id": message_id,
-                    "text": padded_text.replace("__SPACER__", " "),
-                    "disable_web_page_preview": True,
-                }
-                if keyboard is not None:
-                    plain_body["reply_markup"] = {"inline_keyboard": self._sanitize_keyboard(keyboard)}
-                retry_plain = self.tg_api("editMessageText", plain_body)
-                if not retry_plain.get("ok"):
-                    self.send_text(chat_id, text, keyboard)
+        if result.get("ok") or self._is_tg_not_modified(result):
+            return True
+
+        body_fallback: dict[str, Any] = {
+            "chat_id": chat_id,
+            "message_id": int(message_id),
+            "text": formatted,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+        }
+        if keyboard is not None:
+            body_fallback["reply_markup"] = {"inline_keyboard": self._sanitize_keyboard(keyboard)}
+        retry = self.tg_api("editMessageText", body_fallback)
+        if retry.get("ok") or self._is_tg_not_modified(retry):
+            return True
+
+        plain_body: dict[str, Any] = {
+            "chat_id": chat_id,
+            "message_id": int(message_id),
+            "text": padded_text.replace("__SPACER__", " "),
+            "disable_web_page_preview": True,
+        }
+        if keyboard is not None:
+            plain_body["reply_markup"] = {"inline_keyboard": self._sanitize_keyboard(keyboard)}
+        retry_plain = self.tg_api("editMessageText", plain_body)
+        return bool(retry_plain.get("ok") or self._is_tg_not_modified(retry_plain))
+
+    def edit_text(self, chat_id: int | str, message_id: int, text: str, keyboard: list[list[dict[str, Any]]] | None = None) -> None:
+        ok = self.edit_text_strict(chat_id, message_id, text, keyboard)
+        if not ok:
+            self.send_text(chat_id, text, keyboard)
 
     def answer_callback(self, callback_id: str, text: str = "") -> None:
         payload = {"callback_query_id": callback_id}
@@ -1351,6 +1375,28 @@ class PanelBot:
             self.op_seq += 1
             return f"op_{int(time.time())}_{self.op_seq}"
 
+    def _op_signature(self, signature: str) -> str:
+        return str(signature or "").strip().lower()
+
+    def _acquire_task_signature(self, user_id: int, signature: str) -> bool:
+        sig = self._op_signature(signature)
+        if not sig:
+            return True
+        key = (int(user_id), sig)
+        with self.task_lock:
+            if key in self.active_task_signatures:
+                return False
+            self.active_task_signatures.add(key)
+            return True
+
+    def _release_task_signature(self, user_id: int, signature: str) -> None:
+        sig = self._op_signature(signature)
+        if not sig:
+            return
+        key = (int(user_id), sig)
+        with self.task_lock:
+            self.active_task_signatures.discard(key)
+
     def _operation_text(self, op: dict[str, Any], user_id: int) -> str:
         title = self._q(self._tr(user_id, "༺═════⇓ التقدم ⇓═════༻", "༺═════⇓ Progress ⇓═════༻"))
         op_name = str(op.get("name") or "-")
@@ -1391,21 +1437,45 @@ class PanelBot:
         return [[self._btn(self._tr(user_id, "رجوع", "Back"), callback_data="main_menu", style="primary")]]
 
     def _send_progress_message(self, chat_id: int | str, text: str, keyboard: list[list[dict[str, Any]]]) -> int:
-        body: dict[str, Any] = {
-            "chat_id": chat_id,
-            "text": self._format_text(text),
-            "parse_mode": "HTML",
-            "disable_web_page_preview": True,
-            "reply_markup": {"inline_keyboard": keyboard},
-        }
-        res = self.tg_api("sendMessage", body)
-        if isinstance(res, dict) and res.get("ok"):
-            result = res.get("result") or {}
-            try:
-                return int(result.get("message_id") or 0)
-            except Exception:
-                return 0
-        self.send_text(chat_id, text, keyboard)
+        padded_text = self._pad_text_for_keyboard(text, keyboard)
+        formatted = self._format_text(padded_text)
+
+        attempts: list[dict[str, Any]] = []
+        attempts.append(
+            {
+                "chat_id": chat_id,
+                "text": formatted,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+                "reply_markup": {"inline_keyboard": keyboard},
+            }
+        )
+        attempts.append(
+            {
+                "chat_id": chat_id,
+                "text": formatted,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+                "reply_markup": {"inline_keyboard": self._sanitize_keyboard(keyboard)},
+            }
+        )
+        attempts.append(
+            {
+                "chat_id": chat_id,
+                "text": padded_text.replace("__SPACER__", " "),
+                "disable_web_page_preview": True,
+                "reply_markup": {"inline_keyboard": self._sanitize_keyboard(keyboard)},
+            }
+        )
+
+        for body in attempts:
+            res = self.tg_api("sendMessage", body)
+            if isinstance(res, dict) and res.get("ok"):
+                result = res.get("result") or {}
+                try:
+                    return int(result.get("message_id") or 0)
+                except Exception:
+                    return 0
         return 0
 
     def _create_operation(self, user_id: int, chat_id: int | str, name: str, target: str, total: int) -> str:
@@ -1476,7 +1546,7 @@ class PanelBot:
         kb = self._operation_keyboard(op_id, uid, running)
         try:
             if message_id > 0:
-                self.edit_text(chat_id, message_id, text, kb)
+                self.edit_text_strict(chat_id, message_id, text, kb)
             else:
                 new_id = self._send_progress_message(chat_id, text, kb)
                 if new_id:
@@ -1564,6 +1634,8 @@ class PanelBot:
                     continue
                 if int(op.get("user_id") or 0) != int(user_id):
                     continue
+                if str(op.get("status") or "") != "running":
+                    continue
                 rows.append(dict(op))
         rows.sort(key=lambda x: float(x.get("started_at", 0.0) or 0.0), reverse=True)
         return rows[: max(1, int(limit or 20))]
@@ -1573,9 +1645,9 @@ class PanelBot:
         lines = [self._q(self._tr(user_id, "༺═════⇓ عملياتي ⇓═════༻", "༺═════⇓ My Operations ⇓═════༻"))]
         buttons: list[dict[str, Any]] = []
         if not rows:
-            lines.append(self._tr(user_id, "لا توجد عمليات حالياً.", "No operations yet."))
+            lines.append(self._tr(user_id, "لا توجد عمليات جارية حالياً.", "No running operations now."))
         else:
-            lines.append(self._tr(user_id, "اختر عملية لعرض التقدم.", "Choose an operation to view progress."))
+            lines.append(self._tr(user_id, "اختر عملية جارية لعرض التقدم.", "Choose a running operation to view progress."))
             for op in rows:
                 op_id = str(op.get("id") or "")
                 status = str(op.get("status") or "running")
@@ -3091,16 +3163,27 @@ class PanelBot:
         account_name: str | None = None,
         account_names: list[str] | None = None,
     ) -> None:
+        selected_names = [str(x).strip().lower() for x in (account_names or []) if str(x).strip()]
+        selected_names.sort()
+        signature = f"req_range|{str(range_name).strip().lower()}|{int(count or 0)}|{str(account_name or '').strip().lower()}|{','.join(selected_names)}"
+        if not self._acquire_task_signature(user_id, signature):
+            self.send_text(chat_id, self._tr(user_id, "هذه المهمة قيد التنفيذ بالفعل.", "This task is already running."))
+            return
         op_name = self._tr(user_id, "إضافة أرقام", "Add Numbers")
         op_target = self._tr(user_id, f"إضافة رينج ({range_name})", f"Add range ({range_name})")
-        op_id = self._create_operation(user_id, chat_id, op_name, op_target, max(0, int(count or 0)))
+        op_id = ""
+        result = ""
         try:
+            op_id = self._create_operation(user_id, chat_id, op_name, op_target, max(0, int(count or 0)))
             result = self.request_numbers_for_range(user_id, range_name, count, account_name, account_names, op_id)
             status = "cancelled" if self._is_operation_cancelled(op_id) else "completed"
             self._finish_operation(op_id, status)
         except Exception as exc:
             result = self._tr(user_id, f"فشل تنفيذ الطلب: {exc}", f"Request failed: {exc}")
-            self._finish_operation(op_id, "failed", result)
+            if op_id:
+                self._finish_operation(op_id, "failed", result)
+        finally:
+            self._release_task_signature(user_id, signature)
         self.send_text(chat_id, result)
         self.show_main(chat_id, user_id)
 
@@ -3112,12 +3195,20 @@ class PanelBot:
         account_name: str | None = None,
         account_names: list[str] | None = None,
     ) -> None:
+        normalized_rows = [f"{str(r).strip().lower()}:{int(c or 0)}" for r, c in requests_rows]
+        selected_names = [str(x).strip().lower() for x in (account_names or []) if str(x).strip()]
+        selected_names.sort()
+        signature = f"req_multi|{'|'.join(normalized_rows)}|{str(account_name or '').strip().lower()}|{','.join(selected_names)}"
+        if not self._acquire_task_signature(user_id, signature):
+            self.send_text(chat_id, self._tr(user_id, "هذه المهمة قيد التنفيذ بالفعل.", "This task is already running."))
+            return
         total_target = sum(max(0, int(c)) for _r, c in requests_rows)
         op_name = self._tr(user_id, "إضافة أرقام", "Add Numbers")
         op_target = self._tr(user_id, "إضافة عدة رينجات", "Add multiple ranges")
-        op_id = self._create_operation(user_id, chat_id, op_name, op_target, total_target)
+        op_id = ""
         results: list[str] = []
         try:
+            op_id = self._create_operation(user_id, chat_id, op_name, op_target, total_target)
             for rname, count in requests_rows:
                 if self._is_operation_cancelled(op_id):
                     break
@@ -3137,23 +3228,41 @@ class PanelBot:
         except Exception as exc:
             err_msg = self._tr(user_id, f"فشل تنفيذ الطلبات المتعددة: {exc}", f"Failed to process bulk requests: {exc}")
             results.append(err_msg)
-            self._finish_operation(op_id, "failed", err_msg)
+            if op_id:
+                self._finish_operation(op_id, "failed", err_msg)
+        finally:
+            self._release_task_signature(user_id, signature)
         if results:
             sep = "\n\n" + ("-" * 20) + "\n\n"
             self.send_text(chat_id, sep.join(results))
         self.show_main(chat_id, user_id)
 
     def _process_delete_request(self, chat_id: int | str, user_id: int, items: list[str]) -> None:
+        cleaned_items = sorted({str(x).strip() for x in items if str(x).strip()})
+        signature = f"delete_custom|{'|'.join(cleaned_items)}"
+        if not self._acquire_task_signature(user_id, signature):
+            self.send_text(chat_id, self._tr(user_id, "هذه المهمة قيد التنفيذ بالفعل.", "This task is already running."))
+            return
         op_name = self._tr(user_id, "حذف أرقام", "Delete Numbers")
         op_target = self._tr(user_id, "حذف العناصر المحددة", "Delete selected entries")
-        op_id = self._create_operation(user_id, chat_id, op_name, op_target, max(0, len(items)))
-        result = self.delete_numbers(user_id, items, op_id)
-        status = "cancelled" if self._is_operation_cancelled(op_id) else "completed"
-        self._finish_operation(op_id, status)
+        result = ""
+        try:
+            op_id = self._create_operation(user_id, chat_id, op_name, op_target, max(0, len(items)))
+            result = self.delete_numbers(user_id, items, op_id)
+            status = "cancelled" if self._is_operation_cancelled(op_id) else "completed"
+            self._finish_operation(op_id, status)
+        except Exception as exc:
+            result = self._tr(user_id, f"فشل الحذف: {exc}", f"Delete failed: {exc}")
+        finally:
+            self._release_task_signature(user_id, signature)
         self.send_text(chat_id, result)
         self.show_main(chat_id, user_id)
 
     def _process_delete_all_numbers(self, chat_id: int | str, user_id: int) -> None:
+        signature = "delete_all_numbers"
+        if not self._acquire_task_signature(user_id, signature):
+            self.send_text(chat_id, self._tr(user_id, "مهمة حذف كل الأرقام تعمل بالفعل.", "Delete-all task is already running."))
+            return
         rows = self.fetch_numbers()
         ids: list[str] = []
         for row in rows:
@@ -3167,13 +3276,20 @@ class PanelBot:
         if not ids:
             self.send_text(chat_id, self._tr(user_id, "لا توجد أرقام للحذف.", "No numbers to delete."))
             self.show_main(chat_id, user_id)
+            self._release_task_signature(user_id, signature)
             return
         op_name = self._tr(user_id, "حذف أرقام", "Delete Numbers")
         op_target = self._tr(user_id, "حذف كل الأرقام", "Delete all numbers")
-        op_id = self._create_operation(user_id, chat_id, op_name, op_target, max(0, len(ids)))
-        result = self.delete_numbers(user_id, ids, op_id)
-        status = "cancelled" if self._is_operation_cancelled(op_id) else "completed"
-        self._finish_operation(op_id, status)
+        result = ""
+        try:
+            op_id = self._create_operation(user_id, chat_id, op_name, op_target, max(0, len(ids)))
+            result = self.delete_numbers(user_id, ids, op_id)
+            status = "cancelled" if self._is_operation_cancelled(op_id) else "completed"
+            self._finish_operation(op_id, status)
+        except Exception as exc:
+            result = self._tr(user_id, f"فشل حذف كل الأرقام: {exc}", f"Delete all failed: {exc}")
+        finally:
+            self._release_task_signature(user_id, signature)
         self.send_text(chat_id, result)
         self.show_main(chat_id, user_id)
 
@@ -3233,7 +3349,7 @@ class PanelBot:
                 self.answer_callback(callback_id, self._tr(user_id, "العملية غير موجودة.", "Operation not found."))
                 return
             running = str(op_copy.get("status") or "") == "running"
-            self.edit_text(chat_id, message_id, self._operation_text(op_copy, user_id), self._operation_keyboard(op_id, user_id, running))
+            self.edit_text_strict(chat_id, message_id, self._operation_text(op_copy, user_id), self._operation_keyboard(op_id, user_id, running))
             return
         if data.startswith("op_cancel:"):
             op_id = data.split(":", 1)[1].strip()
@@ -4439,6 +4555,14 @@ class PanelBot:
             return
 
         if data == "numbers_delete_all_yes":
+            self._show_loading(
+                chat_id,
+                message_id,
+                self._tr(user_id, "༺═════⇓ حذف الأرقام ⇓═════༻", "༺═════⇓ Delete Numbers ⇓═════༻"),
+                self._tr(user_id, "⏳ جاري تحميل الأرقام من الـ API...", "⏳ Loading numbers from API..."),
+                "numbers_delete",
+                user_id,
+            )
             self._run_async(self._process_delete_all_numbers, chat_id, user_id)
             return
 

@@ -2465,14 +2465,18 @@ class PanelBot:
         if selected_names:
             names_lc = {x.lower() for x in selected_names}
             targets = [row for row in targets if str(row[0]).strip().lower() in names_lc]
+        elif not account_name and len(targets) > 1:
+            # Default to a single account when no account is explicitly selected.
+            # This avoids sending multiple API requests for one user action.
+            targets = targets[:1]
         if not targets:
             return self._tr(user_id, "الحساب غير متاح أو لا يوجد توكن صالح لتنفيذ الطلب.", "Selected account is not available or has no valid token.")
 
-        calls_needed = count // 50
-        calls_by_account: dict[str, int] = {name: 0 for name, _tok in targets}
-        for idx in range(calls_needed):
+        count_by_account: dict[str, int] = {name: 0 for name, _tok in targets}
+        batches_needed = count // 50
+        for idx in range(batches_needed):
             name, _tok = targets[idx % len(targets)]
-            calls_by_account[name] = int(calls_by_account.get(name, 0)) + 1
+            count_by_account[name] = int(count_by_account.get(name, 0)) + 50
         summary: list[str] = []
         total_success = 0
         cancelled = False
@@ -2480,64 +2484,63 @@ class PanelBot:
         api_attempted_total = 0
 
         for name, token in targets:
-            success_calls = 0
+            success_count = 0
             last_err = ""
-            account_calls = int(calls_by_account.get(name, 0))
-            if account_calls <= 0:
+            account_count = int(count_by_account.get(name, 0))
+            if account_count <= 0:
                 continue
-            for _idx in range(1, account_calls + 1):
-                if operation_id and self._is_operation_cancelled(operation_id):
-                    cancelled = True
-                    break
-                ok, _payload, req_err = self.api_post(
-                    "/api/v1/order/range",
-                    {"token": token, "range_name": range_name, "count": 50},
-                    timeout=90,
+            if operation_id and self._is_operation_cancelled(operation_id):
+                cancelled = True
+                break
+
+            # API v3 supports total count directly; send one request with the full assigned count.
+            ok, _payload, req_err = self.api_post(
+                "/api/v1/order/range",
+                {"token": token, "range_name": range_name, "count": account_count},
+                timeout=90,
+            )
+            api_attempted_total += account_count
+            if ok:
+                success_count = account_count
+            else:
+                last_err = req_err
+
+            if operation_id:
+                attempted = self._get_operation_attempted(operation_id) + account_count
+                current_api_success = max(0, int(progress_base)) + total_success + success_count
+                current_api_failed = max(0, attempted - current_api_success)
+                status_text = self._tr(user_id, "نجاح ✅", "OK ✅") if ok else self._tr(user_id, "فشل ❌", "Failed ❌")
+                self._update_operation(
+                    operation_id,
+                    attempted=attempted,
+                    done=current_api_success,
+                    note=self._tr(
+                        user_id,
+                        f"الحساب: {name} | العدد: {account_count} | {status_text} | فشل: {current_api_failed}",
+                        f"Account: {name} | count: {account_count} | {status_text} | failed: {current_api_failed}",
+                    ),
                 )
-                api_attempted_total += 50
-                if operation_id:
-                    attempted = self._get_operation_attempted(operation_id) + 50
-                    current_api_success = max(0, int(progress_base)) + total_success + (success_calls * 50) + (50 if ok else 0)
-                    current_api_failed = max(0, attempted - current_api_success)
-                    status_text = self._tr(user_id, "نجاح ✅", "OK ✅") if ok else self._tr(user_id, "فشل ❌", "Failed ❌")
-                    self._update_operation(
-                        operation_id,
-                        attempted=attempted,
-                        done=current_api_success,
-                        note=self._tr(
-                            user_id,
-                            f"الحساب: {name} | الطلب {_idx}/{account_calls} | {status_text} | فشل: {current_api_failed}",
-                            f"Account: {name} | batch {_idx}/{account_calls} | {status_text} | failed: {current_api_failed}",
-                        ),
-                    )
-                if ok:
-                    success_calls += 1
-                else:
-                    last_err = req_err
+                now_ts = time.time()
+                need_sync = (not ok) or (now_ts - last_live_sync_at >= 10.0)
+                if need_sync:
+                    try:
+                        live_rows = self.fetch_numbers()
+                        existing_now = self._range_existing_count(
+                            range_name,
+                            account_name=account_name if account_name else None,
+                            account_names=selected_names if selected_names else None,
+                            numbers_rows=live_rows,
+                        )
+                        live_done = max(0, existing_now - existing_before)
+                        self._update_operation(
+                            operation_id,
+                            done=max(0, int(progress_base)) + max(total_success + success_count, live_done),
+                        )
+                        last_live_sync_at = now_ts
+                    except Exception:
+                        pass
 
-                # Deep live sync: periodically reconcile progress with actual numbers in API.
-                if operation_id:
-                    now_ts = time.time()
-                    need_sync = (not ok) or (now_ts - last_live_sync_at >= 10.0) or (_idx == account_calls)
-                    if need_sync:
-                        try:
-                            live_rows = self.fetch_numbers()
-                            existing_now = self._range_existing_count(
-                                range_name,
-                                account_name=account_name if account_name else None,
-                                account_names=selected_names if selected_names else None,
-                                numbers_rows=live_rows,
-                            )
-                            live_done = max(0, existing_now - existing_before)
-                            self._update_operation(
-                                operation_id,
-                                done=max(0, int(progress_base)) + max(total_success, live_done),
-                            )
-                            last_live_sync_at = now_ts
-                        except Exception:
-                            pass
-
-            requested_numbers = success_calls * 50
+            requested_numbers = success_count
             if requested_numbers > 0:
                 entry["requested_total"] = int(entry.get("requested_total", 0)) + requested_numbers
                 entry["last_requested_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -2569,8 +2572,8 @@ class PanelBot:
                 except Exception:
                     pass
 
-            expected_for_account = account_calls * 50
-            if success_calls == account_calls:
+            expected_for_account = account_count
+            if success_count == account_count:
                 summary.append(self._tr(user_id, f"{name}: تم طلب {requested_numbers}/{expected_for_account}", f"{name}: requested {requested_numbers}/{expected_for_account}"))
             else:
                 summary.append(
@@ -2679,10 +2682,11 @@ class PanelBot:
         if operation_id:
             self._update_operation(
                 operation_id,
-                total=len(unique_ids),
+                total=len(cleaned),
                 done=0,
                 attempted=0,
                 note=self._tr(user_id, "جاري فحص وحذف الأرقام...", "Validating and deleting numbers..."),
+                force_render=True,
             )
 
         # Group IDs by owning account so deletion goes to correct account.
@@ -2743,123 +2747,139 @@ class PanelBot:
                     return True, max(0, removed), ""
             return False, 0, last_bulk_err
 
-        for name, token in targets:
-            if operation_id and self._is_operation_cancelled(operation_id):
-                cancelled = True
-                break
-            account_ids = by_account.get(name, []) + by_account.get("__ALL__", [])
-            # unique per account
-            dedup_ids: list[str] = []
-            seen_local: set[str] = set()
-            for rid in account_ids:
-                if rid in seen_local:
-                    continue
-                seen_local.add(rid)
-                dedup_ids.append(rid)
-            if not dedup_ids:
-                details.append(f"{name}: skipped")
-                continue
+        if operation_id:
+            # Custom delete with progress: track each provided item as done/failed.
+            # This gives a truthful live panel line-by-line.
+            target_map = {str(n): str(t) for n, t in targets}
+            resolved_by_item: list[tuple[str, str | None]] = []
+            for raw in cleaned:
+                raw_digits = "".join(ch for ch in raw if ch.isdigit())
+                mapped = number_to_id.get(raw) or (number_to_id.get(raw_digits) if raw_digits else None) or (number_to_id.get(f"+{raw_digits}") if raw_digits else None)
+                if mapped:
+                    resolved_by_item.append((raw, mapped))
+                elif "-" in raw or raw.isdigit():
+                    resolved_by_item.append((raw, raw))
+                else:
+                    resolved_by_item.append((raw, None))
 
-            account_removed = 0
-            if len(dedup_ids) == 1:
-                rid = dedup_ids[0]
+            done_items = 0
+            attempted_items = 0
+            note_lines: list[str] = []
+            removed_ids_seen: set[str] = set()
+            details = []
+
+            for raw, rid in resolved_by_item:
+                if self._is_operation_cancelled(operation_id):
+                    cancelled = True
+                    break
+                attempted_items += 1
+                ok_item = False
+                reason = ""
+                if not rid:
+                    reason = self._tr(user_id, "لم يتم العثور على ID", "ID not found")
+                elif rid in removed_ids_seen:
+                    ok_item = True
+                else:
+                    owner = id_to_account.get(rid, "")
+                    candidate_accounts: list[str] = [owner] if owner and owner in target_map else []
+                    if not candidate_accounts:
+                        candidate_accounts = [name for name, _tok in targets]
+                    for acc_name in candidate_accounts:
+                        tok = target_map.get(acc_name, "")
+                        if not tok:
+                            continue
+                        one_ok, one_err = delete_single(tok, rid)
+                        if one_ok:
+                            ok_item = True
+                            break
+                        reason = one_err or reason
+
+                if ok_item:
+                    done_items += 1
+                    total_removed_ids += 1
+                    if rid:
+                        removed_ids_seen.add(rid)
+                    details.append(f"{raw}: done")
+                    note_lines.append(self._tr(user_id, f"{raw}: تم", f"{raw}: done"))
+                else:
+                    last_err = reason or last_err
+                    details.append(f"{raw}: failed")
+                    note_lines.append(self._tr(user_id, f"{raw}: فشل", f"{raw}: failed"))
+                    if reason:
+                        note_lines.append(self._tr(user_id, f"السبب: {reason}", f"reason: {reason}"))
+                self._update_operation(
+                    operation_id,
+                    attempted=attempted_items,
+                    done=done_items,
+                    note="\n".join(note_lines[-14:]),
+                    force_render=True,
+                )
+
+            processed_ids = done_items
+            attempted_ids = attempted_items
+        else:
+            for name, token in targets:
                 if operation_id and self._is_operation_cancelled(operation_id):
                     cancelled = True
                     break
-                attempted_ids += 1
-                single_ok, single_err = delete_single(token, rid)
-                if cancelled:
-                    break
-                if single_ok:
-                    account_removed = 1
-                    processed_ids += 1
-                    if operation_id:
-                        self._update_operation(
-                            operation_id,
-                            attempted=attempted_ids,
-                            done=processed_ids,
-                            note=self._tr(
-                                user_id,
-                                f"الحساب: {name} | حذف فردي ✅ | فشل: {max(0, attempted_ids - processed_ids)}",
-                                f"Account: {name} | single delete ✅ | failed: {max(0, attempted_ids - processed_ids)}",
-                            ),
-                        )
-                else:
-                    last_err = f"{name}: {single_err}"
-                    if operation_id:
-                        self._update_operation(
-                            operation_id,
-                            attempted=attempted_ids,
-                            done=processed_ids,
-                            note=self._tr(
-                                user_id,
-                                f"الحساب: {name} | حذف فردي ❌ | فشل: {max(0, attempted_ids - processed_ids)}",
-                                f"Account: {name} | single delete ❌ | failed: {max(0, attempted_ids - processed_ids)}",
-                            ),
-                        )
-            else:
-                bulk_ok, removed_bulk, bulk_err = delete_bulk(token, dedup_ids)
-                if bulk_ok:
-                    attempted_ids += len(dedup_ids)
-                    account_removed = max(0, int(removed_bulk))
-                    processed_ids += account_removed
-                    if operation_id:
-                        self._update_operation(
-                            operation_id,
-                            attempted=attempted_ids,
-                            done=processed_ids,
-                            note=self._tr(
-                                user_id,
-                                f"الحساب: {name} | حذف جماعي ✅ {account_removed}/{len(dedup_ids)} | فشل: {max(0, attempted_ids - processed_ids)}",
-                                f"Account: {name} | bulk delete ✅ {account_removed}/{len(dedup_ids)} | failed: {max(0, attempted_ids - processed_ids)}",
-                            ),
-                        )
-                else:
-                    # Fallback to single remove when bulk fails.
-                    for rid in dedup_ids:
-                        if operation_id and self._is_operation_cancelled(operation_id):
-                            cancelled = True
-                            break
-                        attempted_ids += 1
-                        one_ok, one_err = delete_single(token, rid)
-                        if one_ok:
-                            account_removed += 1
-                            processed_ids += 1
-                            if operation_id:
-                                self._update_operation(
-                                    operation_id,
-                                    attempted=attempted_ids,
-                                    done=processed_ids,
-                                    note=self._tr(
-                                        user_id,
-                                        f"الحساب: {name} | حذف بديل ✅ | فشل: {max(0, attempted_ids - processed_ids)}",
-                                        f"Account: {name} | fallback delete ✅ | failed: {max(0, attempted_ids - processed_ids)}",
-                                    ),
-                                )
-                        else:
-                            last_err = f"{name}: {one_err or bulk_err}"
-                            if operation_id:
-                                self._update_operation(
-                                    operation_id,
-                                    attempted=attempted_ids,
-                                    done=processed_ids,
-                                    note=self._tr(
-                                        user_id,
-                                        f"الحساب: {name} | حذف بديل ❌ | فشل: {max(0, attempted_ids - processed_ids)}",
-                                        f"Account: {name} | fallback delete ❌ | failed: {max(0, attempted_ids - processed_ids)}",
-                                    ),
-                                )
+                account_ids = by_account.get(name, []) + by_account.get("__ALL__", [])
+                # unique per account
+                dedup_ids: list[str] = []
+                seen_local: set[str] = set()
+                for rid in account_ids:
+                    if rid in seen_local:
+                        continue
+                    seen_local.add(rid)
+                    dedup_ids.append(rid)
+                if not dedup_ids:
+                    details.append(f"{name}: skipped")
+                    continue
+
+                account_removed = 0
+                if len(dedup_ids) == 1:
+                    rid = dedup_ids[0]
+                    if operation_id and self._is_operation_cancelled(operation_id):
+                        cancelled = True
+                        break
+                    attempted_ids += 1
+                    single_ok, single_err = delete_single(token, rid)
                     if cancelled:
                         break
+                    if single_ok:
+                        account_removed = 1
+                        processed_ids += 1
+                    else:
+                        last_err = f"{name}: {single_err}"
+                else:
+                    bulk_ok, removed_bulk, bulk_err = delete_bulk(token, dedup_ids)
+                    if bulk_ok:
+                        attempted_ids += len(dedup_ids)
+                        account_removed = max(0, int(removed_bulk))
+                        processed_ids += account_removed
+                    else:
+                        # Fallback to single remove when bulk fails.
+                        for rid in dedup_ids:
+                            if operation_id and self._is_operation_cancelled(operation_id):
+                                cancelled = True
+                                break
+                            attempted_ids += 1
+                            one_ok, one_err = delete_single(token, rid)
+                            if one_ok:
+                                account_removed += 1
+                                processed_ids += 1
+                            else:
+                                last_err = f"{name}: {one_err or bulk_err}"
+                        if cancelled:
+                            break
 
-            if account_removed > 0:
-                total_ok_accounts += 1
-                total_removed_ids += account_removed
-                details.append(f"{name}: removed={account_removed}")
-            else:
-                details.append(f"{name}: failed")
-            if cancelled:
-                break
+                if account_removed > 0:
+                    total_ok_accounts += 1
+                    total_removed_ids += account_removed
+                    details.append(f"{name}: removed={account_removed}")
+                else:
+                    details.append(f"{name}: failed")
+                if cancelled:
+                    break
 
         unresolved_text = ""
         if unresolved:
@@ -3425,19 +3445,12 @@ class PanelBot:
         if not self._acquire_task_signature(user_id, signature):
             self.send_text(chat_id, self._tr(user_id, "هذه المهمة قيد التنفيذ بالفعل.", "This task is already running."))
             return
-        op_name = self._tr(user_id, "إضافة أرقام", "Add Numbers")
-        op_target = self._tr(user_id, f"إضافة رينج ({range_name})", f"Add range ({range_name})")
-        op_id = ""
         result = ""
         try:
-            op_id = self._create_operation(user_id, chat_id, op_name, op_target, max(0, int(count or 0)))
-            result = self.request_numbers_for_range(user_id, range_name, count, account_name, account_names, op_id)
-            status = "cancelled" if self._is_operation_cancelled(op_id) else "completed"
-            self._finish_operation(op_id, status)
+            # Single-range request: return direct result without progress panel.
+            result = self.request_numbers_for_range(user_id, range_name, count, account_name, account_names, None)
         except Exception as exc:
             result = self._tr(user_id, f"فشل تنفيذ الطلب: {exc}", f"Request failed: {exc}")
-            if op_id:
-                self._finish_operation(op_id, "failed", result)
         finally:
             self._release_task_signature(user_id, signature)
         self.send_text(chat_id, result)
@@ -3458,27 +3471,79 @@ class PanelBot:
         if not self._acquire_task_signature(user_id, signature):
             self.send_text(chat_id, self._tr(user_id, "هذه المهمة قيد التنفيذ بالفعل.", "This task is already running."))
             return
-        total_target = sum(max(0, int(c)) for _r, c in requests_rows)
+        total_target = len(requests_rows)
         op_name = self._tr(user_id, "إضافة أرقام", "Add Numbers")
         op_target = self._tr(user_id, "إضافة عدة رينجات", "Add multiple ranges")
         op_id = ""
+        processed = 0
+        status_lines: list[str] = []
         results: list[str] = []
+
+        def parse_range_outcome(result_text: str, expected_count: int) -> tuple[bool, str]:
+            actual_added = 0
+            total_success = 0
+            m_actual = re.search(r"(?:المضاف فعليًا في الرينج|Actually added in range):\s*(\d+)", result_text, flags=re.IGNORECASE)
+            if m_actual:
+                try:
+                    actual_added = int(m_actual.group(1))
+                except Exception:
+                    actual_added = 0
+            m_success = re.search(r"(?:الإجمالي الناجح|Total success):\s*(\d+)", result_text, flags=re.IGNORECASE)
+            if m_success:
+                try:
+                    total_success = int(m_success.group(1))
+                except Exception:
+                    total_success = 0
+            effective = max(actual_added, total_success)
+            if effective >= max(0, int(expected_count or 0)):
+                return True, ""
+            reason = ""
+            for line in result_text.splitlines():
+                ln = line.strip()
+                if not ln:
+                    continue
+                lnl = ln.lower()
+                if ("خطأ" in ln) or ("error" in lnl) or ("failed" in lnl) or ("فشل" in ln):
+                    reason = ln
+                    break
+            if not reason:
+                reason = self._tr(
+                    user_id,
+                    f"نجاح جزئي {effective}/{max(0, int(expected_count or 0))}",
+                    f"Partial success {effective}/{max(0, int(expected_count or 0))}",
+                )
+            return False, reason
+
         try:
             op_id = self._create_operation(user_id, chat_id, op_name, op_target, total_target)
             for rname, count in requests_rows:
                 if self._is_operation_cancelled(op_id):
                     break
-                base = self._get_operation_done(op_id)
                 result = self.request_numbers_for_range(
                     user_id,
                     rname,
                     count,
                     account_name,
                     account_names,
-                    operation_id=op_id,
-                    progress_base=base,
+                    operation_id=None,
+                    progress_base=0,
                 )
                 results.append(result)
+                processed += 1
+                success, reason = parse_range_outcome(result, count)
+                if success:
+                    status_lines.append(self._tr(user_id, f"{rname}: تم", f"{rname}: done"))
+                else:
+                    status_lines.append(self._tr(user_id, f"{rname}: فشل", f"{rname}: failed"))
+                    if reason:
+                        status_lines.append(self._tr(user_id, f"السبب: {reason}", f"reason: {reason}"))
+                self._update_operation(
+                    op_id,
+                    done=processed,
+                    attempted=processed,
+                    note="\n".join(status_lines[-12:]),
+                    force_render=True,
+                )
             status = "cancelled" if self._is_operation_cancelled(op_id) else "completed"
             self._finish_operation(op_id, status)
         except Exception as exc:
@@ -3503,7 +3568,7 @@ class PanelBot:
         op_target = self._tr(user_id, "حذف العناصر المحددة", "Delete selected entries")
         result = ""
         try:
-            op_id = self._create_operation(user_id, chat_id, op_name, op_target, max(0, len(items)))
+            op_id = self._create_operation(user_id, chat_id, op_name, op_target, max(0, len(cleaned_items)))
             result = self.delete_numbers(user_id, items, op_id)
             status = "cancelled" if self._is_operation_cancelled(op_id) else "completed"
             self._finish_operation(op_id, status)
@@ -3534,14 +3599,10 @@ class PanelBot:
             self.show_main(chat_id, user_id)
             self._release_task_signature(user_id, signature)
             return
-        op_name = self._tr(user_id, "حذف أرقام", "Delete Numbers")
-        op_target = self._tr(user_id, "حذف كل الأرقام", "Delete all numbers")
         result = ""
         try:
-            op_id = self._create_operation(user_id, chat_id, op_name, op_target, max(0, len(ids)))
-            result = self.delete_numbers(user_id, ids, op_id)
-            status = "cancelled" if self._is_operation_cancelled(op_id) else "completed"
-            self._finish_operation(op_id, status)
+            # Delete-all: run directly without progress panel.
+            result = self.delete_numbers(user_id, ids, None)
         except Exception as exc:
             result = self._tr(user_id, f"فشل حذف كل الأرقام: {exc}", f"Delete all failed: {exc}")
         finally:

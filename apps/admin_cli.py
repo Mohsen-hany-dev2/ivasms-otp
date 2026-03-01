@@ -420,28 +420,26 @@ def add_range_command(api_base: str, range_name: str, count: int) -> None:
         return
     heading(f"Add Range | {value} | count={count}")
     ok(f"limit={max_total} | already={already_requested} | remaining={remaining}")
-    calls_needed = count // 50
+    # API v3 supports direct total count in one request.
     for name, token in targets:
-        success_calls = 0
+        success_count = 0
         last_err = ""
-        for idx in range(1, calls_needed + 1):
-            ok_req, payload, req_err = api_post(
-                api_base,
-                "/api/v1/order/range",
-                {"token": token, "range_name": value, "count": 50},
-                timeout=90,
-            )
-            if not ok_req:
-                last_err = req_err
-                err(f"{name}: request failed at batch {idx}/{calls_needed} ({req_err})")
-                continue
-            success_calls += 1
-            if idx == calls_needed:
-                msg = str((payload.get("message") if isinstance(payload, dict) else "") or "request submitted").strip()
-                ok(f"{name}: batch {idx}/{calls_needed} done ({msg})")
+        ok_req, payload, req_err = api_post(
+            api_base,
+            "/api/v1/order/range",
+            {"token": token, "range_name": value, "count": count},
+            timeout=90,
+        )
+        if ok_req:
+            success_count = count
+            msg = str((payload.get("message") if isinstance(payload, dict) else "") or "request submitted").strip()
+            ok(f"{name}: request done ({msg})")
+        else:
+            last_err = req_err
+            err(f"{name}: request failed ({req_err})")
 
-        requested_numbers = success_calls * 50
-        if success_calls == calls_needed:
+        requested_numbers = success_count
+        if success_count == count:
             ok(f"{name}: requested {requested_numbers}/{count} numbers for range '{value}'")
             record_range_request(store, value, name, requested_numbers)
         else:

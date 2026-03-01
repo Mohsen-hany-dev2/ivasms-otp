@@ -792,6 +792,11 @@ def check_api_health(api_base: str) -> bool:
 
 
 def api_login(api_base: str, api_key: str, email: str, password: str) -> str | None:
+    if not str(api_key or "").strip():
+        key = "login_missing_api_key"
+        if _should_log(key, throttle_seconds=120):
+            logger.warning("login skipped | account=%s | reason=missing_api_key", email)
+        return None
     url = f"{api_base}/api/v1/auth/login"
     try:
         r = requests.post(url, json={"email": email, "password": password}, headers=_api_headers(api_key), timeout=90)
@@ -902,12 +907,15 @@ def run_loop(
     group_min_interval = float(os.getenv("TG_GROUP_MIN_INTERVAL_SEC", str(DEFAULT_GROUP_SEND_INTERVAL_SECONDS)).strip() or DEFAULT_GROUP_SEND_INTERVAL_SECONDS)
     last_group_send_at: dict[str, float] = {}
     invalid_groups: set[str] = set()
-    for acc in accounts:
-        tok = get_or_refresh_account_token(current_api_base, current_api_key, acc, account_tokens, token_cache)
-        if tok:
-            logger.info("account ready | account=%s", acc["name"])
-        else:
-            logger.warning("account login failed | account=%s", acc["name"])
+    if current_api_key.strip():
+        for acc in accounts:
+            tok = get_or_refresh_account_token(current_api_base, current_api_key, acc, account_tokens, token_cache)
+            if tok:
+                logger.info("account ready | account=%s", acc["name"])
+            else:
+                logger.warning("account login failed | account=%s", acc["name"])
+    elif _should_log("missing_api_key_boot", throttle_seconds=120):
+        logger.warning("API key is missing; account login disabled until key is set from bot settings")
 
     logger.info(
         "started polling | interval=%ss | start_date=%s | limit=%s",
@@ -959,6 +967,14 @@ def run_loop(
         if not is_fetch_codes_enabled():
             if _should_log("fetch_paused", throttle_seconds=120):
                 logger.info("fetch codes is paused by runtime config")
+            if once:
+                return
+            time.sleep(current_poll_interval)
+            continue
+
+        if not current_api_key.strip():
+            if _should_log("missing_api_key_loop", throttle_seconds=120):
+                logger.warning("API key is missing; skipping fetch cycle")
             if once:
                 return
             time.sleep(current_poll_interval)

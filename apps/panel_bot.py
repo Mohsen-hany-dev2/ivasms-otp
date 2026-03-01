@@ -125,6 +125,7 @@ class PanelBot:
         self.op_ticker_thread.start()
         self.task_lock = threading.Lock()
         self.active_task_signatures: set[tuple[int, str]] = set()
+        self.last_targets_error: str = ""
 
         if not self.bot_token:
             raise RuntimeError("TELEGRAM_BOT_TOKEN is missing in .env")
@@ -1247,7 +1248,8 @@ class PanelBot:
         if not api_key:
             return False, None, "api key missing"
         url = f"{self.api_base}{path}"
-        headers = {"X-API-Key": api_key, "Authorization": f"Bearer {api_key}"}
+        # API v3 expects X-API-Key header for /api/v1 endpoints.
+        headers = {"X-API-Key": api_key}
         try:
             r = requests.post(url, json=body, headers=headers, timeout=timeout)
         except requests.RequestException as exc:
@@ -1258,19 +1260,28 @@ class PanelBot:
         except ValueError:
             payload = {"raw": r.text}
 
+        def _err_text(obj: Any) -> str:
+            if isinstance(obj, dict):
+                detail = obj.get("detail")
+                if isinstance(detail, dict):
+                    dm = str(detail.get("message") or detail.get("error") or "").strip()
+                    if dm:
+                        return dm
+                if isinstance(detail, list):
+                    return str(detail)
+                return str(obj.get("message") or obj.get("error") or detail or obj).strip()
+            return str(obj)
+
         if r.status_code != 200:
-            if isinstance(payload, dict):
-                msg = str(payload.get("message") or payload.get("error") or payload.get("detail") or payload).strip()
-            else:
-                msg = str(payload)
+            msg = _err_text(payload)
             return False, payload, f"status={r.status_code} {msg}"
         if isinstance(payload, dict):
             status_val = payload.get("status")
             if isinstance(status_val, bool) and not status_val:
-                msg = str(payload.get("message") or payload.get("error") or payload.get("detail") or payload).strip()
+                msg = _err_text(payload)
                 return False, payload, msg or "status=false"
             if isinstance(status_val, str) and status_val.strip().lower() in {"error", "failed", "fail"}:
-                msg = str(payload.get("message") or payload.get("error") or payload.get("detail") or payload).strip()
+                msg = _err_text(payload)
                 return False, payload, msg or f"status={status_val}"
         return True, payload, ""
 
@@ -1292,16 +1303,36 @@ class PanelBot:
     def active_accounts(self) -> list[dict[str, Any]]:
         return [x for x in self.load_accounts() if bool(x.get("enabled", True))]
 
+    def _targets_error_message(self, user_id: int, fallback_ar: str, fallback_en: str) -> str:
+        last = str(self.last_targets_error or "").strip().lower()
+        if "api key" in last or "معندكش صلاحيات" in last:
+            return self._tr(
+                user_id,
+                "فشل تسجيل الدخول: API Key غير صالح أو غير مضاف. افتح الإعدادات > API Key ثم أضف المفتاح الصحيح.",
+                "Login failed: API Key is missing/invalid. Open Settings > API Key and set a valid key.",
+            )
+        return self._tr(user_id, fallback_ar, fallback_en)
+
     def resolve_targets(self) -> list[tuple[str, str]]:
+        self.last_targets_error = ""
         targets: list[tuple[str, str]] = []
+        login_errors: list[str] = []
         for acc in self.active_accounts():
-            token, _err = self.api_login(acc["email"], acc["password"])
+            token, err = self.api_login(acc["email"], acc["password"])
             if token:
                 targets.append((acc["name"], token))
+            elif err:
+                login_errors.append(f"{acc.get('name', 'account')}: {err}")
         if targets:
             return targets
         if self.api_session_token:
             return [("session", self.api_session_token)]
+        if login_errors:
+            joined = " | ".join(login_errors[:3])
+            if "معندكش صلاحيات" in joined or "api key" in joined.lower():
+                self.last_targets_error = "API key invalid or missing"
+            else:
+                self.last_targets_error = joined
         return []
 
     def extract_list_payload(self, payload: Any) -> list[Any]:
@@ -2470,7 +2501,11 @@ class PanelBot:
             # This avoids sending multiple API requests for one user action.
             targets = targets[:1]
         if not targets:
-            return self._tr(user_id, "الحساب غير متاح أو لا يوجد توكن صالح لتنفيذ الطلب.", "Selected account is not available or has no valid token.")
+            return self._targets_error_message(
+                user_id,
+                "الحساب غير متاح أو لا يوجد توكن صالح لتنفيذ الطلب.",
+                "Selected account is not available or has no valid token.",
+            )
 
         count_by_account: dict[str, int] = {name: 0 for name, _tok in targets}
         batches_needed = count // 50
@@ -2632,7 +2667,11 @@ class PanelBot:
 
         targets = self.resolve_targets()
         if not targets:
-            return self._tr(user_id, "لا يوجد حساب/توكن صالح للحذف.", "No valid account/token available for deletion.")
+            return self._targets_error_message(
+                user_id,
+                "لا يوجد حساب/توكن صالح للحذف.",
+                "No valid account/token available for deletion.",
+            )
 
         # Map provided numbers to number IDs when possible.
         current_rows = self.fetch_numbers()

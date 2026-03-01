@@ -1474,10 +1474,18 @@ class PanelBot:
         running = str(op_copy.get("status") or "") == "running"
         text = self._operation_text(op_copy, uid)
         kb = self._operation_keyboard(op_id, uid, running)
-        if message_id > 0:
-            self.edit_text(chat_id, message_id, text, kb)
-        else:
-            self._send_progress_message(chat_id, text, kb)
+        try:
+            if message_id > 0:
+                self.edit_text(chat_id, message_id, text, kb)
+            else:
+                new_id = self._send_progress_message(chat_id, text, kb)
+                if new_id:
+                    with self.op_lock:
+                        if op_id in self.operations:
+                            self.operations[op_id]["message_id"] = int(new_id)
+        except Exception as exc:
+            # Never let operation-update failures break the running task.
+            print(f"operation update failed | op={op_id} | error={exc}")
 
     def _finish_operation(self, op_id: str, status: str, note: str = "") -> None:
         with self.op_lock:
@@ -1532,15 +1540,21 @@ class PanelBot:
 
     def _operations_ticker_loop(self) -> None:
         while not self.op_stop_event.wait(self.op_tick_interval_sec):
-            running_ids: list[str] = []
-            with self.op_lock:
-                for op_id, op in self.operations.items():
-                    if not isinstance(op, dict):
-                        continue
-                    if str(op.get("status") or "") == "running":
-                        running_ids.append(op_id)
-            for op_id in running_ids:
-                self._update_operation(op_id, force_render=True)
+            try:
+                running_ids: list[str] = []
+                with self.op_lock:
+                    for op_id, op in self.operations.items():
+                        if not isinstance(op, dict):
+                            continue
+                        if str(op.get("status") or "") == "running":
+                            running_ids.append(op_id)
+                for op_id in running_ids:
+                    try:
+                        self._update_operation(op_id, force_render=True)
+                    except Exception as exc:
+                        print(f"operation ticker item failed | op={op_id} | error={exc}")
+            except Exception as exc:
+                print(f"operation ticker loop failed | error={exc}")
 
     def _list_user_operations(self, user_id: int, limit: int = 20) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
@@ -2227,6 +2241,7 @@ class PanelBot:
         summary: list[str] = []
         total_success = 0
         cancelled = False
+        last_live_sync_at = 0.0
 
         for name, token in targets:
             success_calls = 0
@@ -2246,6 +2261,28 @@ class PanelBot:
                     success_calls += 1
                 else:
                     last_err = req_err
+
+                # Deep live sync: periodically reconcile progress with actual numbers in API.
+                if operation_id:
+                    now_ts = time.time()
+                    need_sync = (not ok) or (now_ts - last_live_sync_at >= 10.0) or (_idx == account_calls)
+                    if need_sync:
+                        try:
+                            live_rows = self.fetch_numbers()
+                            existing_now = self._range_existing_count(
+                                range_name,
+                                account_name=account_name if account_name else None,
+                                account_names=selected_names if selected_names else None,
+                                numbers_rows=live_rows,
+                            )
+                            live_done = max(0, existing_now - existing_before)
+                            self._update_operation(
+                                operation_id,
+                                done=max(0, int(progress_base)) + max(total_success, live_done),
+                            )
+                            last_live_sync_at = now_ts
+                        except Exception:
+                            pass
 
             requested_numbers = success_calls * 50
             if requested_numbers > 0:

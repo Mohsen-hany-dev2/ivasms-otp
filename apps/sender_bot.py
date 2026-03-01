@@ -66,6 +66,7 @@ DEFAULT_COUNTRIES: list[dict[str, str]] = [
     {"dial_code": "216", "name_ar": "تونس", "name_en": "Tunisia", "iso2": "TN", "emoji": "🇹🇳", "emoji_id": ""},
     {"dial_code": "218", "name_ar": "ليبيا", "name_en": "Libya", "iso2": "LY", "emoji": "🇱🇾", "emoji_id": ""},
     {"dial_code": "229", "name_ar": "بنين", "name_en": "Benin", "iso2": "BJ", "emoji": "🇧🇯", "emoji_id": ""},
+    {"dial_code": "261", "name_ar": "مدغشقر", "name_en": "Madagascar", "iso2": "MG", "emoji": "🇲🇬", "emoji_id": ""},
     {"dial_code": "254", "name_ar": "كينيا", "name_en": "Kenya", "iso2": "KE", "emoji": "🇰🇪", "emoji_id": ""},
     {"dial_code": "234", "name_ar": "نيجيريا", "name_en": "Nigeria", "iso2": "NG", "emoji": "🇳🇬", "emoji_id": ""},
     {"dial_code": "1", "name_ar": "الولايات المتحدة", "name_en": "United States", "iso2": "US", "emoji": "🇺🇸", "emoji_id": ""},
@@ -181,10 +182,14 @@ def load_json_list(path: Path) -> list[dict]:
 def load_countries() -> list[dict[str, str]]:
     rows_raw = load_json_list(COUNTRY_FILE)
     rows: list[dict[str, str]] = []
+    seen_dials: set[str] = set()
     for row in rows_raw:
         dial = digits_only(str(row.get("dial_code", "")).strip())
         if not dial:
             continue
+        if dial in seen_dials:
+            continue
+        seen_dials.add(dial)
         rows.append(
             {
                 "dial_code": dial,
@@ -195,6 +200,12 @@ def load_countries() -> list[dict[str, str]]:
                 "emoji_id": str(row.get("emoji_id", "")).strip(),
             }
         )
+    for default_row in DEFAULT_COUNTRIES:
+        dial = digits_only(str(default_row.get("dial_code", "")).strip())
+        if not dial or dial in seen_dials:
+            continue
+        seen_dials.add(dial)
+        rows.append(dict(default_row))
     if not rows:
         rows = [dict(x) for x in DEFAULT_COUNTRIES]
     rows.sort(key=lambda x: len(str(x.get("dial_code", ""))), reverse=True)

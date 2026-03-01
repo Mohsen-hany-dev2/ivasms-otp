@@ -65,6 +65,7 @@ DEFAULT_COUNTRIES: list[dict[str, str]] = [
     {"dial_code": "216", "name_ar": "تونس", "name_en": "Tunisia", "iso2": "TN", "emoji": "🇹🇳", "emoji_id": ""},
     {"dial_code": "218", "name_ar": "ليبيا", "name_en": "Libya", "iso2": "LY", "emoji": "🇱🇾", "emoji_id": ""},
     {"dial_code": "229", "name_ar": "بنين", "name_en": "Benin", "iso2": "BJ", "emoji": "🇧🇯", "emoji_id": ""},
+    {"dial_code": "261", "name_ar": "مدغشقر", "name_en": "Madagascar", "iso2": "MG", "emoji": "🇲🇬", "emoji_id": ""},
     {"dial_code": "254", "name_ar": "كينيا", "name_en": "Kenya", "iso2": "KE", "emoji": "🇰🇪", "emoji_id": ""},
     {"dial_code": "234", "name_ar": "نيجيريا", "name_en": "Nigeria", "iso2": "NG", "emoji": "🇳🇬", "emoji_id": ""},
     {"dial_code": "1", "name_ar": "الولايات المتحدة", "name_en": "United States", "iso2": "US", "emoji": "🇺🇸", "emoji_id": ""},
@@ -917,12 +918,16 @@ class PanelBot:
         if not isinstance(rows, list):
             rows = []
         out: list[dict[str, str]] = []
+        seen_dials: set[str] = set()
         for row in rows:
             if not isinstance(row, dict):
                 continue
             dial = "".join(ch for ch in str(row.get("dial_code", "")).strip() if ch.isdigit())
             if not dial:
                 continue
+            if dial in seen_dials:
+                continue
+            seen_dials.add(dial)
             out.append(
                 {
                     "dial_code": dial,
@@ -933,6 +938,12 @@ class PanelBot:
                     "emoji_id": str(row.get("emoji_id", "")).strip(),
                 }
             )
+        for default_row in DEFAULT_COUNTRIES:
+            dial = "".join(ch for ch in str(default_row.get("dial_code", "")).strip() if ch.isdigit())
+            if not dial or dial in seen_dials:
+                continue
+            seen_dials.add(dial)
+            out.append(dict(default_row))
         if not out:
             out = [dict(x) for x in DEFAULT_COUNTRIES]
         return out

@@ -160,7 +160,14 @@ class PanelBot:
         return out
 
     def is_admin(self, user_id: int) -> bool:
-        return int(user_id or 0) in self.admin_ids
+        uid = int(user_id or 0)
+        if uid in self.admin_ids:
+            return True
+        # Dynamic admin resolution for managed sub-bots without requiring restart.
+        for aid in self._managed_admin_ids_for_current_bot():
+            if uid == aid:
+                return True
+        return False
 
     def is_primary_admin(self, user_id: int) -> bool:
         # Main owner/admin account only.
@@ -752,8 +759,51 @@ class PanelBot:
             return 0
         return 0
 
+    def _managed_admin_ids_for_current_bot(self) -> set[int]:
+        token_here = str(self.bot_token or "").strip()
+        if not token_here:
+            return set()
+        db_path = BASE_DIR / "data" / "storage.db"
+        if not db_path.exists():
+            return set()
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            row = cur.execute("SELECT value FROM kv_store WHERE key='runtime_config'").fetchone()
+            conn.close()
+            if not row:
+                return set()
+            cfg = json.loads(str(row[0]))
+            if not isinstance(cfg, dict):
+                return set()
+            bots = cfg.get("managed_bots")
+            if not isinstance(bots, list):
+                return set()
+            for bot in bots:
+                if not isinstance(bot, dict):
+                    continue
+                token = str(bot.get("bot_token", "") or bot.get("token", "")).strip()
+                if token != token_here:
+                    continue
+                out: set[int] = {PRIMARY_ADMIN_ID}
+                created_by = str(bot.get("created_by", "")).strip()
+                if created_by.isdigit():
+                    out.add(int(created_by))
+                for x in (bot.get("admin_ids") or []):
+                    s = str(x).strip()
+                    if s.isdigit():
+                        out.add(int(s))
+                return out
+        except Exception:
+            return set()
+        return set()
+
     def get_instance_accounts_limit(self) -> int:
-        # Per-bot limit. Prefer supervisor env; fallback to main runtime config.
+        # Per-bot limit. For managed bots, prefer dynamic main runtime config first.
+        dynamic_limit = self._managed_limit_from_main_runtime()
+        if dynamic_limit > 0:
+            return dynamic_limit
+        # Fallback to supervisor env.
         raw = str(os.getenv("BOT_ACCOUNTS_LIMIT", "")).strip()
         if raw:
             try:
@@ -3913,7 +3963,7 @@ class PanelBot:
                 self.answer_callback(callback_id, self._tr(user_id, "ID غير صالح.", "Invalid ID."))
                 return
             if self.remove_managed_bot_admin(bot_id, int(aid)):
-                self.mark_process_restart_change()
+                self.mark_runtime_change()
                 self.answer_callback(callback_id, self._tr(user_id, "تم حذف الأدمن.", "Admin deleted."))
             else:
                 self.answer_callback(callback_id, self._tr(user_id, "لم يتم حذف الأدمن.", "Admin was not deleted."))
@@ -5222,7 +5272,7 @@ class PanelBot:
                 self.send_text(chat_id, self._tr(user_id, "فشل تحديث الحد.", "Failed to update limit."))
                 return
             self.clear_state(user_id)
-            self.mark_process_restart_change()
+            self.mark_runtime_change()
             self.send_text(
                 chat_id,
                 self._tr(
@@ -5245,7 +5295,7 @@ class PanelBot:
                 self.send_text(chat_id, self._tr(user_id, "فشل إضافة الأدمن للبوت.", "Failed to add admin to bot."))
                 return
             self.clear_state(user_id)
-            self.mark_process_restart_change()
+            self.mark_runtime_change()
             self.send_text(
                 chat_id,
                 self._tr(
